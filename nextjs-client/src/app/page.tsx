@@ -22,15 +22,17 @@ interface KeywordsResponse {
 }
 
 export default function Home() {
+  const [jobTitle, setJobTitle] = useState('Senior Product Manager')
   const [jobText, setJobText] = useState('')
+  const [jdUrl, setJdUrl] = useState('')
   const [maxTerms, setMaxTerms] = useState(30)
   const [results, setResults] = useState<KeywordsResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const handleExtractKeywords = async () => {
-    if (!jobText.trim()) {
-      setError('Please enter job description text')
+    if (!jdUrl.trim() && !jobText.trim()) {
+      setError('Please enter either a job posting URL or paste job description text')
       return
     }
 
@@ -39,15 +41,17 @@ export default function Home() {
     setResults(null)
 
     try {
-      const response = await fetch('/api/keywords_text', {
+      const endpoint = jdUrl ? '/api/keywords_url' : '/api/keywords_text'
+      const body = jdUrl
+        ? { job_title: jobTitle, job_url: jdUrl, max_terms: maxTerms }
+        : { job_text: jobText, max_terms: maxTerms }
+
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          job_text: jobText,
-          max_terms: maxTerms,
-        }),
+        body: JSON.stringify(body),
       })
 
       if (!response.ok) {
@@ -103,15 +107,38 @@ export default function Home() {
   return (
     <div className="max-w-7xl mx-auto p-6">
       <h1 className="text-3xl font-bold mb-6 text-center">Recruiter Keyword Extractor</h1>
-      <p className="text-center text-gray-600 mb-8">Extract ATS-scannable keywords organized by recruiter search buckets</p>
+      <p className="text-center text-gray-600 mb-8">Extract ATS-scannable keywords from job posting URLs or text, organized by recruiter search buckets</p>
       
       <div className="max-w-4xl mx-auto space-y-4 mb-8">
         <div>
-          <label className="block text-sm font-medium mb-2">Job Description</label>
+          <label className="block text-sm font-medium mb-2">Job Title (Optional but helpful)</label>
+          <input
+            type="text"
+            value={jobTitle}
+            onChange={(e) => setJobTitle(e.target.value)}
+            placeholder="e.g., Senior Product Manager"
+            className="w-full p-3 border rounded-md"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium mb-2">Job Posting URL</label>
+          <input
+            type="url"
+            value={jdUrl}
+            onChange={(e) => setJdUrl(e.target.value)}
+            placeholder="https://job-posting-url.com"
+            className="w-full p-3 border rounded-md"
+          />
+          <p className="text-sm text-gray-500 mt-1">Or paste the job description text below</p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium mb-2">Job Description Text (Fallback)</label>
           <textarea
             value={jobText}
             onChange={(e) => setJobText(e.target.value)}
-            placeholder="Paste job description here..."
+            placeholder="Paste job description here if URL doesn't work..."
             className="w-full h-32 p-3 border rounded-md"
           />
         </div>
@@ -130,7 +157,7 @@ export default function Home() {
 
         <button
           onClick={handleExtractKeywords}
-          disabled={loading || !jobText.trim()}
+          disabled={loading || (!jdUrl.trim() && !jobText.trim())}
           className="w-full px-4 py-3 bg-blue-600 text-white rounded-md disabled:opacity-50 font-medium"
         >
           {loading ? 'Extracting Keywords...' : 'Extract Keywords'}
