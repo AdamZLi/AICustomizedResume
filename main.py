@@ -1,14 +1,17 @@
+"""
+Main FastAPI application for the Resume Tailoring API
+"""
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, HttpUrl
-from typing import List, Dict, Any
-import openai
 import os
 from dotenv import load_dotenv
-import requests
-from bs4 import BeautifulSoup
-from readability import Document as Readability
-import re
+import openai
+
+# Import our modules
+from models import JobTextRequest, JobURLRequest, KeywordsResponse
+from scraping import fetch_and_clean
+from openai_service import extract_keywords_with_openai
 
 # Load environment variables
 load_dotenv()
@@ -21,9 +24,6 @@ if not api_key:
     client = None
 else:
     client = openai.OpenAI(api_key=api_key)
-
-# User agent for web scraping
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 app = FastAPI(
     title="Resume Tailoring API",
@@ -40,180 +40,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class JobTextRequest(BaseModel):
-    job_text: str = Field(..., description="Job description text to analyze")
-    max_terms: int = Field(default=30, ge=1, le=100, description="Maximum number of terms to extract")
-
-class JobURLRequest(BaseModel):
-    job_title: str = Field(..., description="Job title for context")
-    job_url: HttpUrl = Field(..., description="URL of the job posting to scrape")
-    max_terms: int = Field(default=30, ge=1, le=100, description="Maximum number of terms to extract")
-
-def fetch_and_clean(job_url: str) -> str:
-    """Fetch job posting URL and extract clean text content using enhanced methods"""
-    
-    # Method 1: Try requests with enhanced headers and smart content detection
-    text = try_enhanced_requests_method(job_url)
-    if text and len(text) > 200:
-        return text
-    
-    # Method 2: Try with different user agents
-    text = try_alternative_user_agents(job_url)
-    if text and len(text) > 200:
-        return text
-    
-    # If both methods fail, return what we have
-    return text or ""
-
-def try_enhanced_requests_method(job_url: str) -> str:
-    """Try to fetch content using requests with enhanced headers and smart content detection"""
-    headers = {
-        "User-Agent": UA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    }
-    
-    try:
-        r = requests.get(job_url, timeout=(15, 30), headers=headers)
-        r.raise_for_status()
-        
-        # Try Readability first
-        try:
-            main_html = Readability(r.text).summary()
-            text = BeautifulSoup(main_html, "html.parser").get_text(separator="\n", strip=True)
-        except Exception:
-            # Fallback: try to extract text directly from the page
-            soup = BeautifulSoup(r.text, "html.parser")
-            
-            # Remove script and style elements
-            for script in soup(["script", "style", "nav", "header", "footer", "aside"]):
-                script.decompose()
-            
-            # Smart content detection for job sites
-            content_selectors = [
-                # Job-specific selectors
-                "[class*='job']", "[class*='description']", "[class*='content']",
-                "[id*='job']", "[id*='description']", "[id*='content']",
-                ".job-description", ".job-content", ".description-content",
-                ".posting-content", ".role-description", ".position-description",
-                # Generic content selectors
-                "main", "article", ".content", "#content", ".main-content",
-                # Ashby-specific (if they exist)
-                "[data-testid*='job']", "[data-testid*='description']",
-                ".ashby-job-description", ".ashby-content"
-            ]
-            
-            content_element = None
-            for selector in content_selectors:
-                try:
-                    elements = soup.select(selector)
-                    for element in elements:
-                        if element and len(element.get_text(strip=True)) > 100:
-                            content_element = element
-                            break
-                    if content_element:
-                        break
-                except:
-                    continue
-            
-            # If no specific content area found, try to find the largest text block
-            if not content_element:
-                text_blocks = soup.find_all(["div", "section", "p"])
-                largest_block = None
-                max_length = 0
-                
-                for block in text_blocks:
-                    text_length = len(block.get_text(strip=True))
-                    if text_length > max_length and text_length > 50:
-                        max_length = text_length
-                        largest_block = block
-                
-                if largest_block:
-                    content_element = largest_block
-                else:
-                    # Last resort: get all text
-                    content_element = soup
-            
-            text = content_element.get_text(separator="\n", strip=True)
-        
-        # Clean up the text
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
-        text = re.sub(r"\s+", " ", text)  # Normalize whitespace
-        
-        return text
-        
-    except Exception as e:
-        print(f"Enhanced requests method failed: {e}")
-        return ""
-
-def try_alternative_user_agents(job_url: str) -> str:
-    """Try with different user agents to bypass some bot detection"""
-    alternative_user_agents = [
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ]
-    
-    for user_agent in alternative_user_agents:
-        try:
-            headers = {
-                "User-Agent": user_agent,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-            }
-            
-            r = requests.get(job_url, timeout=(10, 20), headers=headers)
-            r.raise_for_status()
-            
-            # Simple text extraction
-            soup = BeautifulSoup(r.text, "html.parser")
-            
-            # Remove unwanted elements
-            for element in soup(["script", "style", "nav", "header", "footer", "aside"]):
-                element.decompose()
-            
-            text = soup.get_text(separator="\n", strip=True)
-            text = re.sub(r"\n{3,}", "\n\n", text).strip()
-            text = re.sub(r"\s+", " ", text)
-            
-            if len(text) > 200:
-                print(f"Alternative user agent worked: {user_agent[:50]}...")
-                return text
-                
-        except Exception as e:
-            print(f"Alternative user agent failed: {e}")
-            continue
-    
-    return ""
-
-class KeywordItem(BaseModel):
-    text: str = Field(..., description="The keyword text")
-    priority: str = Field(..., description="Priority: must_have, nice_to_have")
-
-class RecruiterBuckets(BaseModel):
-    summary_headline_signals: List[KeywordItem] = Field(..., description="What recruiters search to find profiles fast")
-    core_requirements: List[KeywordItem] = Field(..., description="Role-defining skills from Requirements/Qualifications")
-    methods_frameworks: List[KeywordItem] = Field(..., description="Named ways of working that are searchable")
-    tools_tech_stack: List[KeywordItem] = Field(..., description="Systems and tools recruiters filter on in ATS")
-    domain_platform_keywords: List[KeywordItem] = Field(..., description="Industry or problem space terms")
-    kpis_outcomes_metrics: List[KeywordItem] = Field(..., description="Quantifiable results recruiters scan for")
-    leadership_scope_signals: List[KeywordItem] = Field(..., description="Level indicators recruiters query for when filtering seniors")
-
-class KeywordsResponse(BaseModel):
-    recruiter_buckets: RecruiterBuckets = Field(..., description="Keywords organized by recruiter search buckets")
-
 @app.get("/")
 async def root():
-    return {"message": "Resume Tailoring API - Use POST /keywords_text to extract keywords from job descriptions"}
+    return {"message": "Resume Tailoring API - Use POST /keywords_text or POST /keywords_url to extract keywords from job descriptions"}
 
 @app.post("/keywords_text", response_model=KeywordsResponse)
 async def extract_keywords(request: JobTextRequest):
@@ -252,158 +81,13 @@ async def extract_keywords(request: JobTextRequest):
                 job_title = line.title()
                 break
         
-        # Prepare the improved prompt for OpenAI
-        prompt = f"""You are a top-tier tech recruiter screening Senior Product Manager / Senior Project Manager candidates for big tech and VC-backed startups.
-
-TASK
-From the job description, extract ONLY recruiter/ATS-scannable keywords a strong resume should reflect. Organize them into the seven buckets below.
-
-STRICT EXCLUSIONS
-- Ignore benefits/perks/compensation/location/EEO or company boilerplate (e.g., pto, 401k, equity/rsu, hybrid/remote, wellness, commuter, salary, offices, visa/sponsorship, diversity statements).
-- Exclude company names and generic fluff (e.g., team player, great culture). No dates or salary figures.
-
-WHAT TO EXTRACT (JD-faithful, ATS-friendly)
-- Short, concrete phrases (1–3 words): hard skills, tools/tech, methods/frameworks, domain/platform terms, KPIs/metrics, leadership/scope signals.
-- Prefer items explicitly present in the JD's "Requirements", "Qualifications", and "Responsibilities" sections.
-- Lowercase; deduplicate; total ≤ {request.max_terms} items across all buckets.
-- PRIORITY: label each item as "must_have" (role-defining for THIS JD) or "nice_to_have".
-
-TITLE AWARENESS
-- If product manager ⇒ emphasize product strategy/roadmap, discovery/experimentation (e.g., a/b testing), analytics/metrics (arr, mrr, dau/mau, conversion), platform/apis, growth/monetization, cross-functional leadership.
-- If project manager ⇒ emphasize delivery planning, risk/issue management, scope/schedule/cost, dependencies/critical path, stakeholder management, agile/scrum, pmbok/pmp.
-- Stay strictly faithful to the JD wording.
-
-OUTPUT
-Return ONLY JSON that matches the provided JSON Schema (no prose).
-
-CONTEXT
-job_title: {job_title}
-
-job_description:
-\"\"\"
-{request.job_text}
-\"\"\"
-
-Return the response in this exact JSON format:
-{{
-    "recruiter_buckets": {{
-        "summary_headline_signals": [
-            {{"text": "keyword1", "priority": "must_have"}},
-            {{"text": "keyword2", "priority": "nice_to_have"}}
-        ],
-        "core_requirements": [
-            {{"text": "keyword3", "priority": "must_have"}}
-        ],
-        "methods_frameworks": [
-            {{"text": "keyword4", "priority": "must_have"}}
-        ],
-        "tools_tech_stack": [
-            {{"text": "keyword5", "priority": "must_have"}}
-        ],
-        "domain_platform_keywords": [
-            {{"text": "keyword6", "priority": "must_have"}}
-        ],
-        "kpis_outcomes_metrics": [
-            {{"text": "keyword7", "priority": "must_have"}}
-        ],
-        "leadership_scope_signals": [
-            {{"text": "keyword8", "priority": "must_have"}}
-        ]
-    }}
-}}"""
-        
-        # Call OpenAI API using modern format
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a professional tech recruiter specializing in Product and Project Management roles. Extract relevant keywords that recruiters would screen for in resumes, organized by recruiter search buckets."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=1500,
-            temperature=0.3
+        # Use the OpenAI service to extract keywords
+        return extract_keywords_with_openai(
+            job_title=job_title,
+            job_text=request.job_text,
+            max_terms=request.max_terms
         )
         
-        # Parse OpenAI response
-        content = response.choices[0].message.content
-        
-        # Extract JSON from response (handle potential markdown formatting)
-        import json
-        import re
-        
-        # Try to find JSON in the response
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            try:
-                parsed = json.loads(json_match.group())
-            except json.JSONDecodeError:
-                # Fallback: try to parse the entire response
-                parsed = json.loads(content)
-        else:
-            # Fallback: try to parse the entire response
-            parsed = json.loads(content)
-        
-        # Extract recruiter buckets
-        recruiter_buckets = parsed.get("recruiter_buckets", {})
-        
-        # Process and clean the extracted terms for each bucket
-        def clean_keywords(keywords):
-            if not isinstance(keywords, list):
-                return []
-            
-            cleaned = []
-            for item in keywords:
-                if isinstance(item, dict) and "text" in item and "priority" in item:
-                    text = item.get("text", "").strip().lower()
-                    priority = item.get("priority", "").strip().lower()
-                    
-                    if text and len(text) > 1:
-                        # Validate priority
-                        valid_priorities = ["must_have", "nice_to_have"]
-                        
-                        if priority in valid_priorities:
-                            cleaned.append(KeywordItem(
-                                text=text,
-                                priority=priority
-                            ))
-            
-            # Remove duplicates based on text
-            seen = set()
-            unique_keywords = []
-            for item in cleaned:
-                if item.text not in seen:
-                    seen.add(item.text)
-                    unique_keywords.append(item)
-            
-            return unique_keywords
-        
-        # Process each bucket
-        summary_headline_signals = clean_keywords(recruiter_buckets.get("summary_headline_signals", []))
-        core_requirements = clean_keywords(recruiter_buckets.get("core_requirements", []))
-        methods_frameworks = clean_keywords(recruiter_buckets.get("methods_frameworks", []))
-        tools_tech_stack = clean_keywords(recruiter_buckets.get("tools_tech_stack", []))
-        domain_platform_keywords = clean_keywords(recruiter_buckets.get("domain_platform_keywords", []))
-        kpis_outcomes_metrics = clean_keywords(recruiter_buckets.get("kpis_outcomes_metrics", []))
-        leadership_scope_signals = clean_keywords(recruiter_buckets.get("leadership_scope_signals", []))
-        
-        # Create the response
-        return KeywordsResponse(
-            recruiter_buckets=RecruiterBuckets(
-                summary_headline_signals=summary_headline_signals,
-                core_requirements=core_requirements,
-                methods_frameworks=methods_frameworks,
-                tools_tech_stack=tools_tech_stack,
-                domain_platform_keywords=domain_platform_keywords,
-                kpis_outcomes_metrics=kpis_outcomes_metrics,
-                leadership_scope_signals=leadership_scope_signals
-            )
-        )
-        
-    except openai.APIError as e:
-        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
-    except openai.AuthenticationError as e:
-        raise HTTPException(status_code=500, detail=f"OpenAI authentication error: {str(e)}")
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse OpenAI response: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
@@ -431,7 +115,7 @@ async def keywords_url(request: JobURLRequest):
     try:
         # Fetch and clean the job description from the URL
         jd_text = fetch_and_clean(str(request.job_url))
-    except requests.RequestException as e:
+    except Exception as e:
         raise HTTPException(
             status_code=400, 
             detail=f"Could not fetch page: {str(e)}"
@@ -443,160 +127,14 @@ async def keywords_url(request: JobURLRequest):
             detail="Could not extract enough job text (site may require login or block bots). Please paste the JD text instead."
         )
 
-    # Reuse the existing keyword extraction logic
+    # Use the OpenAI service to extract keywords
     try:
-        # Prepare the improved prompt for OpenAI
-        prompt = f"""You are a top-tier tech recruiter screening Senior Product Manager / Senior Project Manager candidates for big tech and VC-backed startups.
-
-TASK
-From the job description, extract ONLY recruiter/ATS-scannable keywords a strong resume should reflect. Organize them into the seven buckets below.
-
-STRICT EXCLUSIONS
-- Ignore benefits/perks/compensation/location/EEO or company boilerplate (e.g., pto, 401k, equity/rsu, hybrid/remote, wellness, commuter, salary, offices, visa/sponsorship, diversity statements).
-- Exclude company names and generic fluff (e.g., team player, great culture). No dates or salary figures.
-
-WHAT TO EXTRACT (JD-faithful, ATS-friendly)
-- Short, concrete phrases (1–3 words): hard skills, tools/tech, methods/frameworks, domain/platform terms, KPIs/metrics, leadership/scope signals.
-- Prefer items explicitly present in the JD's "Requirements", "Qualifications", and "Responsibilities" sections.
-- Lowercase; deduplicate; total ≤ {request.max_terms} items across all buckets.
-- PRIORITY: label each item as "must_have" (role-defining for THIS JD) or "nice_to_have".
-
-TITLE AWARENESS
-- If product manager ⇒ emphasize product strategy/roadmap, discovery/experimentation (e.g., a/b testing), analytics/metrics (arr, mrr, dau/mau, conversion), platform/apis, growth/monetization, cross-functional leadership.
-- If project manager ⇒ emphasize delivery planning, risk/issue management, scope/schedule/cost, dependencies/critical path, stakeholder management, agile/scrum, pmbok/pmp.
-- Stay strictly faithful to the JD wording.
-
-OUTPUT
-Return ONLY JSON that matches the provided JSON Schema (no prose).
-
-CONTEXT
-job_title: {request.job_title}
-
-job_description:
-\"\"\"
-{jd_text}
-\"\"\"
-
-Return the response in this exact JSON format:
-{{
-    "recruiter_buckets": {{
-        "summary_headline_signals": [
-            {{"text": "keyword1", "priority": "must_have"}},
-            {{"text": "keyword2", "priority": "nice_to_have"}}
-        ],
-        "core_requirements": [
-            {{"text": "keyword3", "priority": "must_have"}}
-        ],
-        "methods_frameworks": [
-            {{"text": "keyword4", "priority": "must_have"}}
-        ],
-        "tools_tech_stack": [
-            {{"text": "keyword5", "priority": "must_have"}}
-        ],
-        "domain_platform_keywords": [
-            {{"text": "keyword6", "priority": "must_have"}}
-        ],
-        "kpis_outcomes_metrics": [
-            {{"text": "keyword7", "priority": "must_have"}}
-        ],
-        "leadership_scope_signals": [
-            {{"text": "keyword8", "priority": "must_have"}}
-        ]
-    }}
-}}"""
-        
-        # Call OpenAI API using modern format
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a professional tech recruiter specializing in Product and Project Management roles. Extract relevant keywords that recruiters would screen for in resumes, organized by recruiter search buckets."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=1500,
-            temperature=0.3
+        return extract_keywords_with_openai(
+            job_title=request.job_title,
+            job_text=jd_text,
+            max_terms=request.max_terms
         )
         
-        # Parse OpenAI response
-        content = response.choices[0].message.content
-        
-        # Extract JSON from response (handle potential markdown formatting)
-        import json
-        import re
-        
-        # Try to find JSON in the response
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            try:
-                parsed = json.loads(json_match.group())
-            except json.JSONDecodeError:
-                # Fallback: try to parse the entire response
-                parsed = json.loads(content)
-        else:
-            # Fallback: try to parse the entire response
-            parsed = json.loads(content)
-        
-        # Extract recruiter buckets
-        recruiter_buckets = parsed.get("recruiter_buckets", {})
-        
-        # Process and clean the extracted terms for each bucket
-        def clean_keywords(keywords):
-            if not isinstance(keywords, list):
-                return []
-            
-            cleaned = []
-            for item in keywords:
-                if isinstance(item, dict) and "text" in item and "priority" in item:
-                    text = item.get("text", "").strip().lower()
-                    priority = item.get("priority", "").strip().lower()
-                    
-                    if text and len(text) > 1:
-                        # Validate priority
-                        valid_priorities = ["must_have", "nice_to_have"]
-                        
-                        if priority in valid_priorities:
-                            cleaned.append(KeywordItem(
-                                text=text,
-                                priority=priority
-                            ))
-            
-            # Remove duplicates based on text
-            seen = set()
-            unique_keywords = []
-            for item in cleaned:
-                if item.text not in seen:
-                    seen.add(item.text)
-                    unique_keywords.append(item)
-            
-            return unique_keywords
-        
-        # Process each bucket
-        summary_headline_signals = clean_keywords(recruiter_buckets.get("summary_headline_signals", []))
-        core_requirements = clean_keywords(recruiter_buckets.get("core_requirements", []))
-        methods_frameworks = clean_keywords(recruiter_buckets.get("methods_frameworks", []))
-        tools_tech_stack = clean_keywords(recruiter_buckets.get("tools_tech_stack", []))
-        domain_platform_keywords = clean_keywords(recruiter_buckets.get("domain_platform_keywords", []))
-        kpis_outcomes_metrics = clean_keywords(recruiter_buckets.get("kpis_outcomes_metrics", []))
-        leadership_scope_signals = clean_keywords(recruiter_buckets.get("leadership_scope_signals", []))
-        
-        # Create the response
-        return KeywordsResponse(
-            recruiter_buckets=RecruiterBuckets(
-                summary_headline_signals=summary_headline_signals,
-                core_requirements=core_requirements,
-                methods_frameworks=methods_frameworks,
-                tools_tech_stack=tools_tech_stack,
-                domain_platform_keywords=domain_platform_keywords,
-                kpis_outcomes_metrics=kpis_outcomes_metrics,
-                leadership_scope_signals=leadership_scope_signals
-            )
-        )
-        
-    except openai.APIError as e:
-        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
-    except openai.AuthenticationError as e:
-        raise HTTPException(status_code=500, detail=f"OpenAI authentication error: {str(e)}")
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse OpenAI response: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
