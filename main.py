@@ -12,6 +12,9 @@ import openai
 from models import JobTextRequest, JobURLRequest, KeywordsResponse
 from scraping import fetch_and_clean
 from openai_service import extract_keywords_with_openai
+from routers.resume import router as resume_router
+from services.resume_loader import ResumeLoaderService
+from services.keyword_match import KeywordMatcher
 
 # Load environment variables
 load_dotenv()
@@ -24,6 +27,10 @@ if not api_key:
     client = None
 else:
     client = openai.OpenAI(api_key=api_key)
+
+# Initialize services
+resume_loader = ResumeLoaderService()
+keyword_matcher = KeywordMatcher()
 
 app = FastAPI(
     title="Resume Tailoring API",
@@ -40,9 +47,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include routers
+app.include_router(resume_router)
+
 @app.get("/")
 async def root():
     return {"message": "Resume Tailoring API - Use POST /keywords_text or POST /keywords_url to extract keywords from job descriptions"}
+
+def extract_all_keywords_from_buckets(buckets):
+    """Extract all keyword texts from the recruiter buckets"""
+    all_keywords = []
+    
+    # Extract from each bucket
+    for bucket_name, bucket_items in buckets.dict().items():
+        if isinstance(bucket_items, list):
+            for item in bucket_items:
+                if isinstance(item, dict) and 'text' in item:
+                    all_keywords.append(item['text'])
+    
+    return all_keywords
 
 @app.post("/keywords_text", response_model=KeywordsResponse)
 async def extract_keywords(request: JobTextRequest):
@@ -50,10 +73,10 @@ async def extract_keywords(request: JobTextRequest):
     Extract recruiter/ATS-scannable keywords from job description text using OpenAI.
     
     Args:
-        request: JobTextRequest containing job_text and max_terms
+        request: JobTextRequest containing job_text, max_terms, and optional resume_id
         
     Returns:
-        KeywordsResponse with keywords organized by recruiter search buckets
+        KeywordsResponse with keywords organized by recruiter search buckets and optional comparison
         
     Raises:
         HTTPException: If job_text is empty or OpenAI API call fails
@@ -82,11 +105,39 @@ async def extract_keywords(request: JobTextRequest):
                 break
         
         # Use the OpenAI service to extract keywords
-        return extract_keywords_with_openai(
+        response = extract_keywords_with_openai(
             job_title=job_title,
             job_text=request.job_text,
             max_terms=request.max_terms
         )
+        
+        # If resume_id is provided, perform keyword comparison
+        if request.resume_id:
+            try:
+                # Load resume text
+                resume_text = resume_loader.get_resume_text(request.resume_id)
+                if resume_text:
+                    # Extract all keywords from buckets
+                    all_keywords = extract_all_keywords_from_buckets(response.recruiter_buckets)
+                    
+                    # Compare keywords to resume
+                    comparison_result = keyword_matcher.compare_keywords_to_resume(resume_text, all_keywords)
+                    
+                    # Add comparison to response
+                    response.comparison = comparison_result
+                else:
+                    # Resume not found or failed to load
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Resume with ID {request.resume_id} not found or could not be loaded"
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                # Log error but don't fail the request - just skip comparison
+                print(f"Warning: Keyword comparison failed: {e}")
+        
+        return response
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
@@ -97,10 +148,10 @@ async def keywords_url(request: JobURLRequest):
     Extract recruiter/ATS-scannable keywords from a job posting URL using OpenAI.
     
     Args:
-        request: JobURLRequest containing job_title, job_url, and max_terms
+        request: JobURLRequest containing job_title, job_url, max_terms, and optional resume_id
         
     Returns:
-        KeywordsResponse with keywords organized by recruiter search buckets
+        KeywordsResponse with keywords organized by recruiter search buckets and optional comparison
         
     Raises:
         HTTPException: If URL cannot be fetched or insufficient text is extracted
@@ -129,11 +180,39 @@ async def keywords_url(request: JobURLRequest):
 
     # Use the OpenAI service to extract keywords
     try:
-        return extract_keywords_with_openai(
+        response = extract_keywords_with_openai(
             job_title=request.job_title,
             job_text=jd_text,
             max_terms=request.max_terms
         )
+        
+        # If resume_id is provided, perform keyword comparison
+        if request.resume_id:
+            try:
+                # Load resume text
+                resume_text = resume_loader.get_resume_text(request.resume_id)
+                if resume_text:
+                    # Extract all keywords from buckets
+                    all_keywords = extract_all_keywords_from_buckets(response.recruiter_buckets)
+                    
+                    # Compare keywords to resume
+                    comparison_result = keyword_matcher.compare_keywords_to_resume(resume_text, all_keywords)
+                    
+                    # Add comparison to response
+                    response.comparison = comparison_result
+                else:
+                    # Resume not found or failed to load
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Resume with ID {request.resume_id} not found or could not be loaded"
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                # Log error but don't fail the request - just skip comparison
+                print(f"Warning: Keyword comparison failed: {e}")
+        
+        return response
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")

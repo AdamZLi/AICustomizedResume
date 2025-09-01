@@ -9,3 +9,4 @@ alwaysApply: true
 - Write thorough tests for all major functionality
 - Avoid making major changes to the patterns and architecture of how a feature works, after it has shown to work well, unless explicitly structed
 - Always think about what other methods and areas of code might be affected by code changes
+- When running the code and testing, if no response for 60 seconds, then timeout and report error and other suggestions
