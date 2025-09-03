@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from 'next/server'
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  try {
-    const resumeId = params.id
+  const { id } = await params
+      try {
+      const resumeId = id
     
     // Forward the request to the backend
     const response = await fetch(`http://localhost:8000/resume/${resumeId}/updated.html`, {

@@ -1,11 +1,11 @@
 """
-Orchestrator for section-based resume rewriting
+Orchestrator for section-based resume rewriting using minimal insertions
 """
 import logging
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 from models import ChangeLogItem
 from services.sections import SectionParser
-from services.openai_client import OpenAIClient
+from services.minimal_insert import MinimalInsertionService
 from services.tokens import token_manager
 
 logger = logging.getLogger(__name__)
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class ResumeRewriter:
     def __init__(self):
         self.section_parser = SectionParser()
-        self.openai_client = OpenAIClient()
+        self.minimal_insertion_service = MinimalInsertionService()
     
     def rewrite_resume_by_sections(
         self, 
@@ -23,17 +23,17 @@ class ResumeRewriter:
         tone: Optional[str] = None
     ) -> Dict[str, any]:
         """
-        Rewrite resume by sections and combine results
+        Rewrite resume by sections using minimal insertions
         Returns: { updated_text, included_keywords, change_log }
         """
         try:
-            logger.info(f"Starting section-based resume rewrite with {len(selected_keywords)} keywords")
+            logger.info(f"Starting minimal insertion resume rewrite with {len(selected_keywords)} keywords")
             
             # Step 1: Split resume into sections
             sections = self.section_parser.split_resume_into_sections(full_text)
             logger.info(f"Parsed resume into {len(sections)} sections: {list(sections.keys())}")
             
-            # Step 2: Process each section
+            # Step 2: Process each section with minimal insertions
             processed_sections = {}
             all_included_keywords = []
             all_change_logs = []
@@ -57,10 +57,10 @@ class ResumeRewriter:
                         processed_sections[section_name] = section_content
                         continue
                     
-                    # Rewrite section
+                    # Process section with minimal insertions
                     try:
-                        result = self.openai_client.rewrite_section(
-                            section_name, section_content, selected_keywords, job_title, tone
+                        result = self._process_section_with_insertions(
+                            section_name, section_content, selected_keywords, job_title
                         )
                         
                         processed_sections[section_name] = result["updated_text"]
@@ -76,7 +76,7 @@ class ResumeRewriter:
                             )
                             all_change_logs.append(change_log_item)
                         
-                        logger.info(f"Successfully processed section '{section_name}'")
+                        logger.info(f"Successfully processed section '{section_name}' with {len(result['included_keywords'])} keywords")
                         
                     except Exception as e:
                         logger.warning(f"Failed to process section '{section_name}': {e}")
@@ -89,7 +89,7 @@ class ResumeRewriter:
             # Step 4: Remove duplicate keywords
             unique_keywords = list(set(all_included_keywords))
             
-            logger.info(f"Section-based rewrite complete: {len(processed_sections)} sections, {len(unique_keywords)} keywords, {len(all_change_logs)} changes")
+            logger.info(f"Minimal insertion rewrite complete: {len(processed_sections)} sections, {len(unique_keywords)} keywords, {len(all_change_logs)} changes")
             
             return {
                 "updated_text": updated_text,
@@ -98,9 +98,82 @@ class ResumeRewriter:
             }
             
         except Exception as e:
-            logger.error(f"Section-based rewrite failed: {e}")
+            logger.error(f"Minimal insertion rewrite failed: {e}")
             raise Exception(f"Resume rewrite failed: {str(e)}")
-    
+
+    def _process_section_with_insertions(
+        self, 
+        section_name: str, 
+        section_content: str, 
+        selected_keywords: List[str], 
+        job_title: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Process a single section using minimal insertions
+        Returns: Dict with updated_text, included_keywords, change_log
+        """
+        try:
+            # Split section into lines
+            lines = section_content.split('\n')
+            if not lines:
+                return {
+                    "updated_text": section_content,
+                    "included_keywords": [],
+                    "change_log": []
+                }
+            
+            # Get keywords for this section
+            section_keywords = self._get_keywords_for_section(
+                section_name, selected_keywords
+            )
+            
+            if not section_keywords:
+                logger.info(f"No keywords selected for section '{section_name}'")
+                return {
+                    "updated_text": section_content,
+                    "included_keywords": [],
+                    "change_log": []
+                }
+            
+            # Plan insertions
+            logger.info(f"Planning insertions for section '{section_name}' with {len(section_keywords)} keywords")
+            insertion_plan = self.minimal_insertion_service.plan_insertions(
+                lines, section_keywords, section_name
+            )
+            
+            # Apply insertions with guardrails
+            logger.info(f"Applying {len(insertion_plan.edits)} insertions to section '{section_name}'")
+            updated_lines, change_log, included_keywords = self.minimal_insertion_service.apply_insertions(
+                lines, insertion_plan
+            )
+            
+            # Reconstruct section text
+            updated_text = '\n'.join(updated_lines)
+            
+            # Log results
+            logger.info(f"Section '{section_name}': {len(included_keywords)} keywords inserted, {len(insertion_plan.skipped_keywords)} skipped")
+            
+            return {
+                "updated_text": updated_text,
+                "included_keywords": included_keywords,
+                "change_log": change_log
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to process section '{section_name}' with insertions: {e}")
+            # Return original content on failure
+            return {
+                "updated_text": section_content,
+                "included_keywords": [],
+                "change_log": []
+            }
+
+    def _get_keywords_for_section(self, section_name: str, all_keywords: List[str]) -> List[str]:
+        """Get keywords that should be placed in this specific section"""
+        # For now, use all keywords for all sections
+        # This can be enhanced with keyword placement analysis later
+        return all_keywords
+
     def _combine_sections(self, sections: Dict[str, str], section_order: List[str]) -> str:
         """Combine processed sections back into full resume"""
         combined_lines = []

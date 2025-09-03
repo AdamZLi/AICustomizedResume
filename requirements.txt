@@ -10,3 +10,4 @@ readability-lxml>=0.3.1
 pymupdf>=1.23.0
 pdfminer.six>=20221105
 tiktoken>=0.5.0
+python-Levenshtein>=0.21.0

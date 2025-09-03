@@ -5,13 +5,20 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form
 from fastapi.responses import FileResponse
 from pathlib import Path
 import logging
+import json
 
-from models import ResumeUploadResponse, ResumeTextResponse, ResumeRewriteRequest, ResumeRewriteResponse
+from models import (
+    ResumeUploadResponse, ResumeTextResponse, ResumeRewriteRequest, ResumeRewriteResponse,
+    EditPlanRequest, EditPlanResponse, ApplyPlanRequest, ApplyPlanResponse, AnnotatedPDFResponse
+)
 from services.storage import PDFStorageService
 from services.resume_parser import ResumeParserService
 from services.rewrite_by_sections import ResumeRewriter
 from services.pdf_render import PDFRenderer
 from services.pdf_annotate import PDFAnnotator
+from services.edit_plan import EditPlanService
+from services.apply_plan import ApplyPlanService
+from services.sections import ResumeSectionService
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +205,7 @@ async def rewrite_resume(request: ResumeRewriteRequest):
             resume_id=request.resume_id,
             pdf_url=f"/resume/{request.resume_id}/updated.html",
             updated_text=updated_text,
+            original_text=full_text,
             change_log=change_log,
             included_keywords=included_keywords
         )
@@ -226,3 +234,209 @@ async def get_updated_html(resume_id: str):
     except Exception as e:
         logging.error(f"Failed to serve updated HTML: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to serve updated HTML")
+
+@router.post("/edit-plan", response_model=EditPlanResponse)
+async def generate_edit_plan(request: EditPlanRequest):
+    """
+    Generate an edit plan for incorporating keywords into a resume section
+    
+    Args:
+        request: EditPlanRequest with resume_id and selected_keywords
+        
+    Returns:
+        EditPlanResponse with the generated edit plan
+    """
+    try:
+        # Get the original PDF path
+        pdf_path = storage_service.get_pdf_path(request.resume_id)
+        if not pdf_path:
+            raise HTTPException(status_code=404, detail="Resume not found")
+        
+        # Extract text from the original PDF
+        full_text, _ = parser_service.extract_text(pdf_path)
+        if not full_text:
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+        
+        # Initialize services
+        section_service = ResumeSectionService()
+        edit_plan_service = EditPlanService()
+        
+        # Get the most relevant section for keyword incorporation
+        section_name, section_text = section_service.get_best_section_for_keywords(
+            full_text, request.selected_keywords
+        )
+        
+        # Split section into lines
+        lines = [line.strip() for line in section_text.split('\n') if line.strip()]
+        
+        # Generate edit plan
+        edit_plan = edit_plan_service.make_edit_plan(
+            section_name=section_name,
+            lines=lines,
+            selected_keywords=request.selected_keywords
+        )
+        
+        return EditPlanResponse(
+            resume_id=request.resume_id,
+            edit_plan=edit_plan,
+            section_name=section_name,
+            original_lines=lines
+        )
+        
+    except Exception as e:
+        logging.error(f"Edit plan generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Edit plan generation failed: {str(e)}")
+
+@router.post("/apply-plan", response_model=ApplyPlanResponse)
+async def apply_edit_plan(request: ApplyPlanRequest):
+    """
+    Apply an edit plan to update resume text
+    
+    Args:
+        request: ApplyPlanRequest with resume_id, edit_plan, and section_name
+        
+    Returns:
+        ApplyPlanResponse with updated text and change log
+    """
+    try:
+        # Get the original PDF path
+        pdf_path = storage_service.get_pdf_path(request.resume_id)
+        if not pdf_path:
+            raise HTTPException(status_code=404, detail="Resume not found")
+        
+        # Extract text from the original PDF
+        full_text, _ = parser_service.extract_text(pdf_path)
+        if not full_text:
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+        
+        # Initialize services
+        section_service = ResumeSectionService()
+        apply_plan_service = ApplyPlanService()
+        
+        # Get the section text
+        section_name, section_text = section_service.get_section_by_name(
+            full_text, request.section_name
+        )
+        
+        # Split section into lines
+        original_lines = [line.strip() for line in section_text.split('\n') if line.strip()]
+        
+        # Apply the edit plan
+        updated_lines, change_log, applied_keywords = apply_plan_service.apply_edit_plan(
+            original_lines=original_lines,
+            edit_plan=request.edit_plan.dict()
+        )
+        
+        # Generate diff preview
+        diff_preview = apply_plan_service.generate_diff_preview(original_lines, updated_lines)
+        
+        return ApplyPlanResponse(
+            resume_id=request.resume_id,
+            updated_lines=updated_lines,
+            change_log=change_log,
+            applied_keywords=applied_keywords,
+            diff_preview=diff_preview
+        )
+        
+    except Exception as e:
+        logging.error(f"Edit plan application failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Edit plan application failed: {str(e)}")
+
+@router.post("/{resume_id}/annotate", response_model=AnnotatedPDFResponse)
+async def create_annotated_pdf(
+    resume_id: str,
+    edit_plan: str = Form(...),
+    section_name: str = Form(...)
+):
+    """
+    Create an annotated PDF with highlights and notes based on edit plan
+    
+    Args:
+        resume_id: Unique identifier for the resume
+        edit_plan: Edit plan to apply for annotation
+        section_name: Name of the section being annotated
+        
+    Returns:
+        AnnotatedPDFResponse with URLs to annotated and original PDFs
+    """
+    try:
+        # Parse the edit plan JSON string
+        try:
+            edit_plan_dict = json.loads(edit_plan)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid edit plan JSON")
+        
+        # Get the original PDF path
+        pdf_path = storage_service.get_pdf_path(resume_id)
+        if not pdf_path:
+            raise HTTPException(status_code=404, detail="Resume not found")
+        
+        # Extract text from the original PDF
+        full_text, _ = parser_service.extract_text(pdf_path)
+        if not full_text:
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+        
+        # Initialize services
+        section_service = ResumeSectionService()
+        pdf_annotator = PDFAnnotator()
+        
+        # Get the section text
+        section_name, section_text = section_service.get_section_by_name(
+            full_text, section_name
+        )
+        
+        # Split section into lines
+        original_lines = [line.strip() for line in section_text.split('\n') if line.strip()]
+        
+        # Create annotated PDF
+        annotated_path = pdf_annotator.annotate_pdf_with_edits(
+            pdf_path=pdf_path,
+            edit_plan=edit_plan_dict,
+            original_lines=original_lines
+        )
+        
+        # Get annotation summary
+        annotation_summary = pdf_annotator.get_annotation_summary(annotated_path, edit_plan_dict)
+        
+        # Build response
+        return AnnotatedPDFResponse(
+            resume_id=resume_id,
+            annotated_pdf_url=f"/resume/{resume_id}/annotated.pdf",
+            annotation_summary=annotation_summary,
+            original_pdf_url=f"/resume/{resume_id}/pdf"
+        )
+        
+    except Exception as e:
+        logging.error(f"PDF annotation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"PDF annotation failed: {str(e)}")
+
+@router.get("/{resume_id}/annotated.pdf")
+async def get_annotated_pdf(resume_id: str):
+    """
+    Get the annotated PDF file
+    
+    Args:
+        resume_id: Unique identifier for the resume
+        
+    Returns:
+        Annotated PDF file for download
+    """
+    try:
+        # Look for annotated PDF
+        annotated_path = f"uploads/{resume_id}-annotated.pdf"
+        
+        # Check if file exists
+        import os
+        if not os.path.exists(annotated_path):
+            raise HTTPException(status_code=404, detail="Annotated PDF not found")
+        
+        return FileResponse(
+            path=annotated_path,
+            media_type="application/pdf",
+            filename=f"resume-{resume_id}-annotated.pdf",
+            headers={"Content-Disposition": "attachment"}
+        )
+        
+    except Exception as e:
+        logging.error(f"Failed to serve annotated PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to serve annotated PDF")

@@ -105,31 +105,22 @@ def build_regex_pattern(keyword: str) -> str:
     # Normalize the keyword first
     normalized = normalize_nfkc_lower(keyword)
     
-    # Handle common punctuation variants
-    # Replace slashes with pattern that matches slash, space, or "and"
-    pattern = re.sub(r'/', r'(?:/|\\s+|\\s+and\\s+)', normalized)
+    # Escape special regex characters
+    escaped = re.escape(normalized)
     
-    # Replace hyphens with pattern that matches hyphen or space
-    pattern = re.sub(r'-', r'(?:-|\\s+)', pattern)
+    # Handle hyphen variants - replace escaped hyphens with pattern that matches hyphen or space
+    escaped = re.sub(r'\\-', r'(?:-|\\s+)', escaped)
     
-    # Handle parentheses - make them optional
-    pattern = re.sub(r'[()]', r'[()]?', pattern)
-    
-    # Escape remaining special regex characters
-    pattern = re.escape(pattern)
-    
-    # Fix the escaped patterns we created
-    pattern = re.sub(r'\\\\(?:/|\\\\s\+|\\\\s\+and\\\\s\+)', r'(?:/|\\s+|\\s+and\\s+)', pattern)
-    pattern = re.sub(r'\\\\(?:-|\\\\s\+)', r'(?:-|\\s+)', pattern)
-    pattern = re.sub(r'\\\\[()]\\?', r'[()]?', pattern)
+    # Handle slash variants - replace escaped slashes with pattern that matches slash, space, or "and"
+    escaped = re.sub(r'\\/', r'(?:/|\\s+|\\s+and\\s+)', escaped)
     
     # Add word boundaries where safe (not at punctuation)
     if re.match(r'^[a-zA-Z]', keyword):
-        pattern = r'\b' + pattern
+        escaped = r'\b' + escaped
     if re.match(r'[a-zA-Z]$', keyword):
-        pattern = pattern + r'\b'
+        escaped = escaped + r'\b'
     
-    return pattern
+    return escaped
 
 def clean_text_for_matching(text: str) -> str:
     """

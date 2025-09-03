@@ -1,624 +1,638 @@
 'use client'
 
 import { useState } from 'react'
+import PreviewPanel from './components/PreviewPanel'
 
 interface KeywordItem {
   text: string
-  priority: string
+  isSelected: boolean
+  isAutoSelected?: boolean
 }
 
-interface RecruiterBuckets {
-  summary_headline_signals: KeywordItem[]
-  core_requirements: KeywordItem[]
-  methods_frameworks: KeywordItem[]
-  tools_tech_stack: KeywordItem[]
-  domain_platform_keywords: KeywordItem[]
-  kpis_outcomes_metrics: KeywordItem[]
-  leadership_scope_signals: KeywordItem[]
-}
-
-interface KeywordsResponse {
-  recruiter_buckets: RecruiterBuckets
-  comparison?: {
-    included: Array<{ text: string; positions: number[][]; match_type: string }>
-    missing: Array<{ text: string }>
-    coverage: { included: number; missing: number; percent: number }
-  }
-}
-
-interface ResumeUploadResponse {
+interface ResumeRewriteResponse {
   resume_id: string
-  filename: string
-  message: string
+  updated_text: string
+  change_log: Array<{
+    section: string
+    before: string
+    after: string
+    keywords_used: string[]
+  }>
+  included_keywords: string[]
+  pdf_url: string
+  original_text: string
+  annotated_pdf_url?: string
+  annotation_summary?: any
 }
 
 export default function Home() {
-  const [jobTitle, setJobTitle] = useState('Senior Product Manager')
-  const [jobText, setJobText] = useState('')
-  const [jdUrl, setJdUrl] = useState('')
-  const [maxTerms, setMaxTerms] = useState(30)
-  const [results, setResults] = useState<KeywordsResponse | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  // Resume state
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [uploadedResume, setUploadedResume] = useState<ResumeUploadResponse | null>(null)
-  const [uploadLoading, setUploadLoading] = useState(false)
-  const [uploadError, setUploadError] = useState<string | null>(null)
-  const [showPreview, setShowPreview] = useState(false)
-  const [selectedKeywords, setSelectedKeywords] = useState<string[]>([])
-  const [activeTab, setActiveTab] = useState<'included' | 'missing'>('included')
-  const [rewriteLoading, setRewriteLoading] = useState(false)
-  const [rewriteResult, setRewriteResult] = useState<string | null>(null)
-  const [rewriteError, setRewriteError] = useState<string | null>(null)
+  const [uploadedResumeId, setUploadedResumeId] = useState<string | null>(null)
+  const [isUploading, setIsUploading] = useState(false)
+  const [resumeName, setResumeName] = useState<string>('')
+  
+  // Job details state
+  const [jobTitle, setJobTitle] = useState('')
+  const [jobUrl, setJobUrl] = useState('')
+  const [showJdText, setShowJdText] = useState(false)
+  const [jdText, setJdText] = useState('')
+  const [isExtracting, setIsExtracting] = useState(false)
+  
+  // Keywords state
+  const [keywords, setKeywords] = useState<KeywordItem[]>([])
+  
+  // Results state
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [tailorResult, setTailorResult] = useState<ResumeRewriteResponse | null>(null)
 
+  // Upload Resume
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
-    if (file) {
-      if (file.type !== 'application/pdf') {
-        setUploadError('Please select a PDF file')
-        setSelectedFile(null)
-        return
-      }
+    if (file && file.type === 'application/pdf') {
       setSelectedFile(file)
-      setUploadError(null)
     }
   }
 
   const handleUpload = async () => {
     if (!selectedFile) return
-
-    setUploadLoading(true)
-    setUploadError(null)
-
+    
+    setIsUploading(true)
     try {
       const formData = new FormData()
       formData.append('file', selectedFile)
-
+      
       const response = await fetch('/api/upload_resume', {
         method: 'POST',
         body: formData,
       })
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error || 'Upload failed')
+      
+      if (response.ok) {
+        const result = await response.json()
+        setUploadedResumeId(result.resume_id)
+        setResumeName(selectedFile.name)
+        setSelectedFile(null)
       }
-
-      const data: ResumeUploadResponse = await response.json()
-      setUploadedResume(data)
-      setSelectedFile(null)
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : 'Upload failed')
+    } catch (error) {
+      console.error('Upload failed:', error)
     } finally {
-      setUploadLoading(false)
+      setIsUploading(false)
     }
   }
 
-  const handleRewriteResume = async () => {
-    if (!uploadedResume || selectedKeywords.length === 0) {
-      setRewriteError('Please upload a resume and select keywords first')
-      return
-    }
-
-    setRewriteLoading(true)
-    setRewriteError(null)
-    setRewriteResult(null)
-
+  // Extract Keywords
+  const handleExtractKeywords = async () => {
+    if (!uploadedResumeId || (!jobUrl && !jdText)) return
+    
+    setIsExtracting(true)
     try {
-      const response = await fetch('/api/resume/rewrite', {
+      const response = await fetch('/api/keywords_url', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          resume_id: uploadedResume.resume_id,
-          selected_keywords: selectedKeywords,
+          resume_id: uploadedResumeId,
+          job_title: jobTitle,
+          job_url: jobUrl,
+          job_text: jdText,
+          max_terms: 30
         }),
       })
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error || 'Rewrite failed')
-      }
-
-      const data = await response.json()
-      // Extract resume_id from the URL and construct frontend API URL
-      const resumeId = data.resume_id
-      const downloadUrl = `/api/resume/${resumeId}/updated`
-      setRewriteResult(downloadUrl)
-    } catch (err) {
-      setRewriteError(err instanceof Error ? err.message : 'Rewrite failed')
-    } finally {
-      setRewriteLoading(false)
-    }
-  }
-
-  const handleExtractKeywords = async () => {
-    if (!jdUrl.trim() && !jobText.trim()) {
-      setError('Please enter either a job posting URL or paste job description text')
-      return
-    }
-
-    setLoading(true)
-    setError(null)
-    setResults(null)
-
-    try {
-      const endpoint = jdUrl ? '/api/keywords_url' : '/api/keywords_text'
-      const body = jdUrl
-        ? { 
-            job_title: jobTitle, 
-            job_url: jdUrl, 
-            max_terms: maxTerms,
-            ...(uploadedResume && { resume_id: uploadedResume.resume_id })
-          }
-        : { 
-            job_text: jobText, 
-            max_terms: maxTerms,
-            ...(uploadedResume && { resume_id: uploadedResume.resume_id })
-          }
-
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      })
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.detail || 'Failed to extract keywords')
-      }
-
-      const data: KeywordsResponse = await response.json()
-      setResults(data)
       
-      // Auto-select missing keywords for resume rewriting
-      if (data.comparison && data.comparison.missing.length > 0) {
-        const missingKeywords = data.comparison.missing.map(item => item.text)
-        setSelectedKeywords(missingKeywords)
+      if (response.ok) {
+        const result = await response.json()
+        
+        // Process keywords with auto-selection
+        const allKeywords: string[] = []
+        
+        // Extract all keywords from recruiter buckets
+        if (result.recruiter_buckets) {
+          Object.values(result.recruiter_buckets).forEach((bucket: unknown) => {
+            if (Array.isArray(bucket)) {
+              bucket.forEach((item: { text?: string }) => {
+                if (item.text && !allKeywords.includes(item.text)) {
+                  allKeywords.push(item.text)
+                }
+              })
+            }
+          })
+        }
+        
+        // Get included keywords from comparison
+        const includedKeywords: string[] = []
+        if (result.comparison && result.comparison.included) {
+          result.comparison.included.forEach((item: { text?: string }) => {
+            if (item.text && !includedKeywords.includes(item.text)) {
+              includedKeywords.push(item.text)
+            }
+          })
+        }
+        
+        const keywordItems: KeywordItem[] = allKeywords.map((keyword: string) => ({
+          text: keyword,
+          isSelected: !includedKeywords.includes(keyword), // Auto-select MISSING keywords (not included ones)
+          isAutoSelected: !includedKeywords.includes(keyword) // Mark missing keywords as auto-selected
+        }))
+        
+        setKeywords(keywordItems)
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An unexpected error occurred')
+    } catch (error) {
+      console.error('Keyword extraction failed:', error)
     } finally {
-      setLoading(false)
+      setIsExtracting(false)
     }
   }
 
-  const renderKeywordItem = (item: KeywordItem) => (
-    <span 
-      key={item.text} 
-      className={`px-3 py-2 rounded-md text-sm font-medium border ${
-        item.priority === 'must_have' 
-          ? 'bg-red-100 text-red-800 border-red-200' 
-          : 'bg-blue-100 text-blue-800 border-blue-200'
-      }`}
-    >
-      {item.text}
-      <span className={`ml-2 px-2 py-1 rounded text-xs ${
-        item.priority === 'must_have' 
-          ? 'bg-red-200 text-red-700' 
-          : 'bg-blue-200 text-blue-700'
-      }`}>
-        {item.priority.replace('_', ' ')}
-      </span>
-    </span>
-  )
+  // Keywords Management
+  const toggleKeyword = (index: number) => {
+    setKeywords(prev => prev.map((kw, i) => 
+      i === index ? { ...kw, isSelected: !kw.isSelected } : kw
+    ))
+  }
 
-  const renderBucket = (title: string, items: KeywordItem[], color: string, description: string) => (
-    <div className={`bg-white rounded-lg shadow-md p-6 border-l-4 border-l-${color}-500`}>
-      <h3 className={`text-lg font-semibold mb-2 text-${color}-700`}>
-        {title} ({items.length})
-      </h3>
-      <p className="text-sm text-gray-600 mb-4">{description}</p>
-      {items.length > 0 ? (
-        <div className="flex flex-wrap gap-2">
-          {items.map(renderKeywordItem)}
-        </div>
-      ) : (
-        <p className="text-gray-500 italic">No keywords found for this bucket</p>
-      )}
-    </div>
-  )
+  const clearAll = () => {
+    setKeywords(prev => prev.map(kw => ({ ...kw, isSelected: false })))
+  }
+
+  const clearAutoSelected = () => {
+    setKeywords(prev => prev.map(kw => ({ 
+      ...kw, 
+      isSelected: kw.isSelected && !kw.isAutoSelected 
+    })))
+  }
+
+  // Plan and Annotate Resume
+  const handleTailorResume = async () => {
+    if (!uploadedResumeId) return
+    
+    const selectedKeywords = keywords.filter(kw => kw.isSelected).map(kw => kw.text)
+    if (selectedKeywords.length === 0) return
+    
+    console.log('Starting plan-and-annotate workflow...')
+    console.log('Resume ID:', uploadedResumeId)
+    console.log('Selected keywords:', selectedKeywords)
+    console.log('Job title:', jobTitle)
+    
+    setIsProcessing(true)
+    try {
+      // Step 1: Generate Edit Plan
+      console.log('Step 1: Generating edit plan...')
+      const editPlanResponse = await fetch('/api/resume/edit-plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          resume_id: uploadedResumeId,
+          selected_keywords: selectedKeywords,
+          job_title: jobTitle
+        }),
+      })
+      
+      console.log('Edit plan response status:', editPlanResponse.status)
+      if (!editPlanResponse.ok) {
+        const errorText = await editPlanResponse.text()
+        console.error('Edit plan error response:', errorText)
+        throw new Error(`Failed to generate edit plan: ${editPlanResponse.status} - ${errorText}`)
+      }
+      
+      const editPlanResult = await editPlanResponse.json()
+      console.log('Edit plan generated:', editPlanResult)
+      
+      // Step 2: Apply Edit Plan
+      console.log('Applying edit plan...')
+      const applyPlanResponse = await fetch('/api/resume/apply-plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          resume_id: uploadedResumeId,
+          edit_plan: editPlanResult.edit_plan,
+          section_name: editPlanResult.section_name
+        }),
+      })
+      
+      console.log('Apply plan response status:', applyPlanResponse.status)
+      if (!applyPlanResponse.ok) {
+        const errorText = await applyPlanResponse.text()
+        console.error('Apply plan error response:', errorText)
+        throw new Error(`Failed to apply edit plan: ${applyPlanResponse.status} - ${errorText}`)
+      }
+      
+      const applyPlanResult = await applyPlanResponse.json()
+      console.log('Edit plan applied:', applyPlanResult)
+      
+      // Step 3: Create Annotated PDF
+      console.log('Creating annotated PDF...')
+      const formData = new FormData()
+      formData.append('edit_plan', JSON.stringify(editPlanResult.edit_plan))
+      formData.append('section_name', editPlanResult.section_name)
+      
+      const annotateResponse = await fetch(`/api/resume/${uploadedResumeId}/annotate`, {
+        method: 'POST',
+        body: formData,
+      })
+      
+      console.log('Annotation response status:', annotateResponse.status)
+      if (!annotateResponse.ok) {
+        const errorText = await annotateResponse.text()
+        console.error('Annotation error response:', errorText)
+        throw new Error(`Failed to create annotated PDF: ${annotateResponse.status} - ${errorText}`)
+      }
+      
+      const annotateResult = await annotateResponse.json()
+      console.log('Annotated PDF created:', annotateResult)
+      
+      // Create result object compatible with existing UI
+      const result = {
+        resume_id: uploadedResumeId,
+        updated_text: applyPlanResult.updated_lines.join('\n'),
+        change_log: applyPlanResult.change_log,
+        included_keywords: applyPlanResult.applied_keywords,
+        pdf_url: annotateResult.annotated_pdf_url,
+        original_text: editPlanResult.original_lines.join('\n'),
+        annotated_pdf_url: annotateResult.annotated_pdf_url,
+        annotation_summary: annotateResult.annotation_summary
+      }
+      
+      setTailorResult(result)
+      console.log('Plan-and-annotate workflow completed successfully!')
+      
+    } catch (error) {
+      console.error('Plan-and-annotate workflow failed:', error)
+      
+      // Show more detailed error information
+      let errorMessage = 'Failed to process resume. '
+      if (error instanceof Error) {
+        errorMessage += error.message
+      } else if (typeof error === 'string') {
+        errorMessage += error
+      } else {
+        errorMessage += 'Unknown error occurred'
+      }
+      
+      console.error('Detailed error:', error)
+      alert(errorMessage)
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
+  const handleDownload = async () => {
+    if (!tailorResult) return
+    
+    try {
+      // Download the annotated PDF instead of HTML
+      const response = await fetch(`/api/resume/${tailorResult.resume_id}/annotated.pdf`)
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'tailored-resume-annotated.pdf'
+      document.body.appendChild(a)
+      a.click()
+      window.URL.revokeObjectURL(url)
+      document.body.removeChild(a)
+    } catch (error) {
+      console.error('Download failed:', error)
+    }
+  }
+
+  const selectedKeywords = keywords.filter(kw => kw.isSelected).map(kw => kw.text)
+  const unselectedKeywords = keywords.filter(kw => !kw.isSelected).map(kw => kw.text)
+  const coverage = keywords.length > 0 ? Math.round((selectedKeywords.length / keywords.length) * 100) : 0
 
   return (
-    <div className="max-w-7xl mx-auto p-6">
-      <h1 className="text-3xl font-bold mb-6 text-center">Resume Tailoring App</h1>
-      <p className="text-center text-gray-600 mb-8">Upload your resume and extract keywords to tailor it perfectly</p>
-      
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
-        {/* Resume Upload Section */}
+    <div className="min-h-screen bg-gray-50">
+      <div className="max-w-7xl mx-auto p-6">
+        {/* Header */}
+        <div className="text-center mb-8">
+          <h1 className="text-3xl font-semibold text-gray-900 mb-2">Resume Tailor</h1>
+          <p className="text-gray-600">Upload once, tailor for multiple job descriptions</p>
+        </div>
+
         <div className="space-y-6">
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-            <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center">
-              <div className="w-2 h-2 rounded-full bg-green-500 mr-3"></div>
-              Resume Upload
-            </h2>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Select PDF Resume</label>
-                <input
-                  type="file"
-                  accept="application/pdf"
-                  onChange={handleFileSelect}
-                  className="w-full p-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                />
-                <p className="text-xs text-gray-500 mt-1">PDF files only, max 10MB</p>
-              </div>
-              <button
-                onClick={handleUpload}
-                disabled={!selectedFile || uploadLoading}
-                className="px-6 py-2 bg-green-600 text-white rounded-lg disabled:opacity-50 font-medium text-sm hover:bg-green-700 transition-colors"
-              >
-                {uploadLoading ? 'Uploading...' : 'Upload & Preview'}
-              </button>
-              {uploadError && (
-                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
-                  {uploadError}
-                </div>
-              )}
-              {uploadedResume && (
-                <div className="space-y-3">
-                  <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-green-700 text-sm">
-                    ✅ Resume uploaded successfully: {uploadedResume.filename}
+          {/* Top Section - Input Areas */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            {/* Left Column - Resume & Job Details */}
+            <div className="lg:col-span-1 space-y-6">
+              {/* Resume Upload */}
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+                <h2 className="text-xl font-semibold text-gray-900 mb-4">Resume</h2>
+                
+                {!uploadedResumeId ? (
+                  <div className="space-y-4">
+                    <div className="border-2 border-dashed border-gray-300 rounded-xl p-6">
+                      <input
+                        type="file"
+                        accept="application/pdf"
+                        onChange={handleFileSelect}
+                        className="hidden"
+                        id="file-upload"
+                      />
+                      <label htmlFor="file-upload" className="cursor-pointer">
+                        <div className="text-center">
+                          <div className="mx-auto w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mb-4">
+                            <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                            </svg>
+                          </div>
+                          <p className="text-sm text-gray-600">
+                            {selectedFile ? selectedFile.name : 'Click to select PDF file'}
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+                    
+                    <button
+                      onClick={handleUpload}
+                      disabled={!selectedFile || isUploading}
+                      className="w-full bg-blue-600 text-white py-3 px-6 rounded-xl font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {isUploading ? 'Uploading...' : 'Upload Resume'}
+                    </button>
                   </div>
-                  <button
-                    onClick={() => setShowPreview(!showPreview)}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
-                  >
-                    {showPreview ? '📄 Hide Preview' : '📄 Show Preview'}
-                  </button>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between p-3 bg-green-50 rounded-lg border border-green-200">
+                      <div className="flex items-center">
+                        <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center mr-3">
+                          <svg className="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium text-green-800">{resumeName}</p>
+                          <p className="text-xs text-green-600">Ready for tailoring</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setUploadedResumeId(null)
+                          setResumeName('')
+                          setKeywords([])
+                          setTailorResult(null)
+                        }}
+                        className="text-green-600 hover:text-green-800 text-sm"
+                      >
+                        Change
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Job Details - Compact Layout */}
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+                <h2 className="text-xl font-semibold text-gray-900 mb-4">Job Details</h2>
+                
+                <div className="space-y-3">
+                  {/* Job Title - Compact */}
+                  <div className="flex items-center space-x-3">
+                    <label className="text-sm font-medium text-gray-700 w-20 flex-shrink-0">
+                      Job Title:
+                    </label>
+                    <input
+                      type="text"
+                      value={jobTitle}
+                      onChange={(e) => setJobTitle(e.target.value)}
+                      placeholder="e.g., Senior Product Manager"
+                      className="flex-1 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
+                    />
+                  </div>
                   
-                  {showPreview && (
-                    <div className="mt-4 border border-gray-200 rounded-lg overflow-hidden">
-                      <div className="bg-gray-50 px-4 py-2 border-b border-gray-200">
-                        <h4 className="text-sm font-medium text-gray-700">Resume Preview</h4>
-                      </div>
-                      <div className="h-96">
-                        <iframe
-                          src={`/api/resume/${uploadedResume.resume_id}/pdf`}
-                          className="w-full h-full"
-                          title="Resume Preview"
-                        />
-                      </div>
+                  {/* Job URL - Compact */}
+                  <div className="flex items-center space-x-3">
+                    <label className="text-sm font-medium text-gray-700 w-20 flex-shrink-0">
+                      URL:
+                    </label>
+                    <input
+                      type="url"
+                      value={jobUrl}
+                      onChange={(e) => setJobUrl(e.target.value)}
+                      placeholder="https://job-posting-url.com"
+                      className="flex-1 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
+                    />
+                  </div>
+                  
+                  {/* JD Text Toggle and Extract Button - Same Line */}
+                  <div className="flex items-center justify-between">
+                    <button
+                      onClick={() => setShowJdText(!showJdText)}
+                      className="text-blue-600 hover:text-blue-700 text-sm font-medium"
+                    >
+                      {showJdText ? 'Hide JD text' : 'Paste JD text instead'}
+                    </button>
+                    
+                    <button
+                      onClick={handleExtractKeywords}
+                      disabled={!uploadedResumeId || (!jobUrl && !jdText) || isExtracting}
+                      className="bg-blue-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm"
+                    >
+                      {isExtracting ? 'Extracting...' : 'Extract Keywords'}
+                    </button>
+                  </div>
+                  
+                  {/* JD Text Area - Conditional */}
+                  {showJdText && (
+                    <div className="flex items-start space-x-3">
+                      <div className="w-20 flex-shrink-0"></div>
+                      <textarea
+                        value={jdText}
+                        onChange={(e) => setJdText(e.target.value)}
+                        placeholder="Paste job description here..."
+                        rows={3}
+                        className="flex-1 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
+                      />
                     </div>
                   )}
                 </div>
+              </div>
+            </div>
+
+            {/* Right Column - Keywords */}
+            <div className="lg:col-span-2">
+              {keywords.length > 0 ? (
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+                  <div className="flex items-center justify-between mb-6">
+                    <h2 className="text-xl font-semibold text-gray-900">Keywords</h2>
+                    <div className="flex items-center space-x-4">
+                      <div className="text-right">
+                        <p className="text-sm text-gray-600">Coverage</p>
+                        <p className="text-2xl font-bold text-blue-600">{coverage}%</p>
+                      </div>
+                      <div className="w-24 bg-gray-200 rounded-full h-2">
+                        <div 
+                          className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${coverage}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {/* Keyword Tabs */}
+                  <div className="mb-6">
+                    <div className="border-b border-gray-200">
+                      <nav className="flex space-x-8">
+                        <button className="py-2 px-1 border-b-2 border-blue-500 text-blue-600 font-medium text-sm">
+                          Included ({selectedKeywords.length})
+                        </button>
+                        <button className="py-2 px-1 border-b-2 border-transparent text-gray-500 hover:text-gray-700 font-medium text-sm">
+                          Missing ({unselectedKeywords.length})
+                        </button>
+                      </nav>
+                    </div>
+                  </div>
+                  
+                  {/* Keywords Grid */}
+                  <div className="mb-6">
+                    <div className="flex flex-wrap gap-2">
+                      {keywords.map((keyword, index) => (
+                        <button
+                          key={index}
+                          onClick={() => toggleKeyword(index)}
+                          className={`
+                            px-3 py-1.5 rounded-full text-sm font-medium transition-colors
+                            ${keyword.isSelected 
+                              ? 'bg-blue-100 text-blue-700 border border-blue-200' 
+                              : 'bg-gray-100 text-gray-700 border border-gray-200 hover:bg-gray-200'
+                            }
+                            ${keyword.isAutoSelected ? 'ring-2 ring-yellow-400' : ''}
+                          `}
+                        >
+                          {keyword.text}
+                          {keyword.isAutoSelected && (
+                            <span className="ml-1 text-yellow-600">•</span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* Actions */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex space-x-3">
+                      <button
+                        onClick={clearAll}
+                        className="text-sm text-gray-600 hover:text-gray-800"
+                      >
+                        Clear All
+                      </button>
+                      <button
+                        onClick={clearAutoSelected}
+                        className="text-sm text-gray-600 hover:text-gray-800"
+                      >
+                        Clear Auto-Selected
+                      </button>
+                    </div>
+                    
+                    <button
+                                              onClick={handleTailorResume}
+                      disabled={selectedKeywords.length === 0 || isProcessing}
+                      className="bg-blue-600 text-white py-2 px-6 rounded-xl font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                                              {isProcessing ? 'Processing...' : 'Tailor Resume'}
+                    </button>
+                  </div>
+                </div>
+              ) : uploadedResumeId ? (
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+                  <div className="text-center py-12">
+                    <div className="mx-auto w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mb-6">
+                      <svg className="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                      </svg>
+                    </div>
+                    <h2 className="text-xl font-semibold text-gray-900 mb-2">Ready to Extract Keywords</h2>
+                    <p className="text-gray-600 mb-6">Enter job details on the left to analyze keywords and see how well your resume matches</p>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-2xl mx-auto">
+                      <div className="text-center p-4 bg-gray-50 rounded-lg">
+                        <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-2">
+                          <span className="text-sm font-medium text-blue-600">1</span>
+                        </div>
+                        <p className="text-sm text-gray-700">Enter job title & URL</p>
+                      </div>
+                      <div className="text-center p-4 bg-gray-50 rounded-lg">
+                        <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-2">
+                          <span className="text-sm font-medium text-blue-600">2</span>
+                        </div>
+                        <p className="text-sm text-gray-700">Extract keywords</p>
+                      </div>
+                      <div className="text-center p-4 bg-gray-50 rounded-lg">
+                        <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-2">
+                          <span className="text-sm font-medium text-blue-600">3</span>
+                        </div>
+                        <p className="text-sm text-gray-700">Review & tailor</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+                  <div className="text-center py-12">
+                    <div className="mx-auto w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mb-6">
+                      <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    </div>
+                    <h2 className="text-xl font-semibold text-gray-900 mb-2">Upload Your Resume First</h2>
+                    <p className="text-gray-600 mb-8">Start by uploading your PDF resume on the left to begin tailoring it for job applications</p>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-2xl mx-auto">
+                      <div className="text-center">
+                        <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-3">
+                          <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                          </svg>
+                        </div>
+                        <h3 className="text-sm font-medium text-gray-900 mb-1">Upload Resume</h3>
+                        <p className="text-xs text-gray-500">PDF format, max 10MB</p>
+                      </div>
+                      <div className="text-center">
+                        <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-3">
+                          <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                          </svg>
+                        </div>
+                        <h3 className="text-sm font-medium text-gray-500 mb-1">Extract Keywords</h3>
+                        <p className="text-xs text-gray-400">From job description</p>
+                      </div>
+                      <div className="text-center">
+                        <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-3">
+                          <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                          </svg>
+                        </div>
+                        <h3 className="text-sm font-medium text-gray-500 mb-1">Tailor Resume</h3>
+                        <p className="text-xs text-gray-400">With selected keywords</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               )}
             </div>
           </div>
-        </div>
 
-        {/* Keyword Extraction Section */}
-        <div className="space-y-6">
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-            <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center">
-              <div className="w-2 h-2 rounded-full bg-blue-500 mr-3"></div>
-              Keyword Extraction
-            </h2>
-            <div className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium mb-2">Job Title (Optional but helpful)</label>
-          <input
-            type="text"
-            value={jobTitle}
-            onChange={(e) => setJobTitle(e.target.value)}
-            placeholder="e.g., Senior Product Manager"
-            className="w-full p-3 border rounded-md"
-          />
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium mb-2">Job Posting URL</label>
-          <input
-            type="url"
-            value={jdUrl}
-            onChange={(e) => setJdUrl(e.target.value)}
-            placeholder="https://job-posting-url.com"
-            className="w-full p-3 border rounded-md"
-          />
-          <p className="text-sm text-gray-500 mt-1">Or paste the job description text below</p>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium mb-2">Job Description Text (Fallback)</label>
-          <input
-            type="text"
-            value={jobText}
-            onChange={(e) => setJobText(e.target.value)}
-            placeholder="Paste job description here if URL doesn't work..."
-            className="w-full p-3 border rounded-md"
-          />
-        </div>
-
-        <div className="w-48">
-          <label className="block text-sm font-medium mb-2">Max Terms</label>
-          <input
-            type="number"
-            value={maxTerms}
-            onChange={(e) => setMaxTerms(Number(e.target.value))}
-            min="1"
-            max="100"
-            className="w-full p-2 border rounded-md"
-          />
-        </div>
-
-        <button
-          onClick={handleExtractKeywords}
-          disabled={loading || (!jdUrl.trim() && !jobText.trim())}
-          className="w-full px-4 py-3 bg-blue-600 text-white rounded-md disabled:opacity-50 font-medium"
-        >
-          {loading ? 'Extracting Keywords...' : 'Extract Keywords'}
-        </button>
-
-        {error && (
-          <div className="p-3 bg-red-100 border border-red-300 rounded-md text-red-800">
-            {error}
-          </div>
-        )}
+          {/* Bottom Section - Results */}
+          {tailorResult && (
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-xl font-semibold text-gray-900">Results</h2>
+                <button
+                  onClick={handleDownload}
+                  className="bg-green-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-green-700 transition-colors"
+                >
+                  Download PDF
+                </button>
+              </div>
+              
+                                  <PreviewPanel
+                                      originalText={tailorResult.original_text}
+                updatedText={tailorResult.updated_text}
+                includedKeywords={tailorResult.included_keywords}
+                resumeId={tailorResult.resume_id}
+                    />
             </div>
-          </div>
+          )}
         </div>
       </div>
-
-      {results && (
-        <div className="space-y-6">
-          <h2 className="text-2xl font-semibold text-center">Recruiter Search Buckets</h2>
-          
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {renderBucket(
-              "Summary / Headline Signals", 
-              results.recruiter_buckets.summary_headline_signals, 
-              "green", 
-              "What recruiters search to find profiles fast"
-            )}
-            
-            {renderBucket(
-              "Core Requirements", 
-              results.recruiter_buckets.core_requirements, 
-              "blue", 
-              "Role-defining skills from Requirements/Qualifications"
-            )}
-            
-            {renderBucket(
-              "Methods & Frameworks", 
-              results.recruiter_buckets.methods_frameworks, 
-              "purple", 
-              "Named ways of working that are searchable"
-            )}
-            
-            {renderBucket(
-              "Tools & Tech Stack", 
-              results.recruiter_buckets.tools_tech_stack, 
-              "orange", 
-              "Systems and tools recruiters filter on in ATS"
-            )}
-            
-            {renderBucket(
-              "Domain / Platform Keywords", 
-              results.recruiter_buckets.domain_platform_keywords, 
-              "indigo", 
-              "Industry or problem space terms"
-            )}
-            
-            {renderBucket(
-              "KPIs / Outcomes / Metrics", 
-              results.recruiter_buckets.kpis_outcomes_metrics, 
-              "pink", 
-              "Quantifiable results recruiters scan for"
-            )}
-            
-            {renderBucket(
-              "Leadership & Scope Signals", 
-              results.recruiter_buckets.leadership_scope_signals, 
-              "teal", 
-              "Level indicators recruiters query for when filtering seniors"
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Keyword Comparison Results */}
-      {results && results.comparison && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-          <h3 className="text-xl font-semibold text-gray-900 mb-4">Keyword Comparison Results</h3>
-          
-          {/* Coverage Stats */}
-          <div className="mb-6 p-4 bg-gray-50 rounded-lg">
-            <div className="flex justify-between items-center">
-              <div className="text-center">
-                <div className="text-2xl font-bold text-green-600">{results.comparison.coverage.included}</div>
-                <div className="text-sm text-gray-600">Included</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-red-600">{results.comparison.coverage.missing}</div>
-                <div className="text-sm text-gray-600">Missing</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-blue-600">{results.comparison.coverage.percent}%</div>
-                <div className="text-sm text-gray-600">Coverage</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Tabs */}
-          <div className="flex space-x-1 mb-4">
-            <button
-              onClick={() => setActiveTab('included')}
-              className={`px-4 py-2 rounded-lg font-medium ${
-                activeTab === 'included'
-                  ? 'bg-blue-100 text-blue-700'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              Included ({results.comparison.included.length})
-            </button>
-            <button
-              onClick={() => setActiveTab('missing')}
-              className={`px-4 py-2 rounded-lg font-medium ${
-                activeTab === 'missing'
-                  ? 'bg-red-100 text-red-700'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              Missing ({results.comparison.missing.length})
-            </button>
-          </div>
-
-          {/* Keyword Lists */}
-          <div className="space-y-4">
-            {activeTab === 'included' && (
-              <div className="flex flex-wrap gap-2">
-                {results.comparison.included.map((item, index) => (
-                  <span
-                    key={index}
-                    className="px-3 py-2 bg-green-100 text-green-800 text-sm rounded-full border border-green-300 font-medium"
-                  >
-                    {item.text}
-                    <span className="ml-2 px-2 py-1 bg-green-200 text-green-700 rounded text-xs">
-                      {item.match_type}
-                    </span>
-                  </span>
-                ))}
-              </div>
-            )}
-            
-            {activeTab === 'missing' && (
-              <div className="flex flex-wrap gap-2">
-                {results.comparison.missing.map((item, index) => (
-                  <span
-                    key={index}
-                    className="px-3 py-2 bg-red-100 text-red-800 text-sm rounded-full border border-red-300 font-medium"
-                  >
-                    {item.text}
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Auto-selection Notice */}
-          {results.comparison.missing.length > 0 && (
-            <div className="mt-6 p-4 bg-orange-50 border border-orange-200 rounded-lg">
-              <h4 className="text-sm font-medium text-orange-800 mb-2">
-                🎯 Auto-selection Notice
-              </h4>
-              <p className="text-sm text-orange-700 mb-3">
-                Missing keywords have been automatically selected for resume rewriting. You can clear them or modify the selection.
-              </p>
-              <div className="flex space-x-2">
-                <button
-                  onClick={() => setSelectedKeywords([])}
-                  className="px-3 py-1 bg-orange-600 text-white rounded text-sm hover:bg-orange-700 transition-colors"
-                >
-                  Clear All
-                </button>
-                <button
-                  onClick={() => {
-                    if (results.comparison) {
-                      const missingKeywords = results.comparison.missing.map(item => item.text)
-                      setSelectedKeywords(missingKeywords)
-                    }
-                  }}
-                  className="px-3 py-1 bg-orange-600 text-white rounded text-sm hover:bg-orange-700 transition-colors"
-                >
-                  Clear Auto-Selected
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Auto-selected Keywords Display */}
-      {selectedKeywords.length > 0 && (
-        <div className="mt-8 p-6 bg-orange-50 border border-orange-200 rounded-lg">
-          <h3 className="text-lg font-semibold text-orange-800 mb-4">
-            🎯 Auto-selected Missing Keywords ({selectedKeywords.length})
-          </h3>
-          <p className="text-sm text-orange-700 mb-4">
-            These keywords were automatically selected because they were not found in your resume. 
-            You can use them for resume rewriting.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {selectedKeywords.map((keyword, index) => (
-              <span
-                key={index}
-                className="px-3 py-2 bg-orange-100 text-orange-800 text-sm rounded-full border border-orange-300 font-medium cursor-pointer hover:bg-orange-200 transition-colors flex items-center"
-                onClick={() => {
-                  setSelectedKeywords(prev => prev.filter((_, i) => i !== index))
-                }}
-                title="Click to remove"
-              >
-                {keyword}
-                <span className="ml-2 text-orange-600 hover:text-orange-800">×</span>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Rewrite Resume Section */}
-      {uploadedResume && selectedKeywords.length > 0 && (
-        <div className="mt-8 p-6 bg-white rounded-xl shadow-sm border border-gray-100">
-          <h3 className="text-xl font-semibold text-gray-900 mb-4 flex items-center">
-            <div className="w-2 h-2 rounded-full bg-purple-500 mr-3"></div>
-            Rewrite Resume with Keywords
-          </h3>
-          <p className="text-sm text-gray-600 mb-4">
-            Rewrite your resume to include the selected keywords and improve your chances of passing ATS screening.
-          </p>
-          
-          <button
-            onClick={handleRewriteResume}
-            disabled={rewriteLoading}
-            className="px-6 py-3 bg-purple-600 text-white rounded-lg disabled:opacity-50 font-medium hover:bg-purple-700 transition-colors"
-          >
-            {rewriteLoading ? '🔄 Rewriting Resume...' : '✏️ Rewrite Resume'}
-          </button>
-
-          {rewriteError && (
-            <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
-              {typeof rewriteError === 'string' ? rewriteError : JSON.stringify(rewriteError)}
-            </div>
-          )}
-
-          {rewriteResult && (
-            <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
-              <h4 className="text-sm font-medium text-green-800 mb-2">✅ Resume Rewritten Successfully!</h4>
-              <p className="text-sm text-green-700 mb-3">
-                Your resume has been updated with the selected keywords.
-              </p>
-              <button
-                onClick={async () => {
-                  try {
-                    const response = await fetch(rewriteResult)
-                    if (!response.ok) {
-                      throw new Error('Download failed')
-                    }
-                    const blob = await response.blob()
-                    const url = window.URL.createObjectURL(blob)
-                    const a = document.createElement('a')
-                    a.href = url
-                    a.download = 'rewritten-resume.html'
-                    document.body.appendChild(a)
-                    a.click()
-                    window.URL.revokeObjectURL(url)
-                    document.body.removeChild(a)
-                  } catch (error) {
-                    console.error('Download error:', error)
-                    alert('Download failed. Please try again.')
-                  }
-                }}
-                className="inline-block px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm font-medium"
-              >
-                📄 Download Rewritten Resume
-              </button>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   )
 }

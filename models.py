@@ -3,7 +3,7 @@ Data models and schemas for the Resume Tailoring API
 """
 
 from pydantic import BaseModel, Field, HttpUrl
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 class JobTextRequest(BaseModel):
     """Request model for text-based keyword extraction"""
@@ -94,5 +94,53 @@ class ResumeRewriteResponse(BaseModel):
     resume_id: str = Field(..., description="Unique identifier for the resume")
     pdf_url: str = Field(..., description="URL to download the updated PDF")
     updated_text: str = Field(..., description="Full updated resume text")
+    original_text: str = Field(..., description="Original text before rewriting")
     change_log: List[ChangeLogItem] = Field(..., description="Detailed log of all changes made")
     included_keywords: List[str] = Field(..., description="Keywords that were successfully incorporated")
+
+class EditPlanRequest(BaseModel):
+    """Request model for generating edit plans"""
+    resume_id: str = Field(..., description="Unique identifier for the resume")
+    selected_keywords: List[str] = Field(..., description="List of keywords to incorporate")
+    job_title: Optional[str] = Field(None, description="Target job title for context")
+
+class EditPlanEdit(BaseModel):
+    """Individual edit from the edit plan"""
+    line: int = Field(..., description="Line number (1-based)")
+    strategy: str = Field(..., description="Edit strategy: modifier, parenthetical, or tail")
+    after_anchor: Optional[str] = Field("", description="Text to insert after (if applicable)")
+    insertion: str = Field(..., description="Text to insert (max 25 characters)")
+    keywords_used: List[str] = Field(..., description="Keywords incorporated in this edit")
+
+class EditPlan(BaseModel):
+    """Complete edit plan for a resume section"""
+    edits: List[EditPlanEdit] = Field(..., description="List of edits to apply")
+    skipped_keywords: List[str] = Field(..., description="Keywords that couldn't be safely incorporated")
+
+class EditPlanResponse(BaseModel):
+    """Response model for edit plan generation"""
+    resume_id: str = Field(..., description="Unique identifier for the resume")
+    edit_plan: EditPlan = Field(..., description="Generated edit plan")
+    section_name: str = Field(..., description="Name of the section the plan applies to")
+    original_lines: List[str] = Field(..., description="Original text lines from the section")
+
+class ApplyPlanRequest(BaseModel):
+    """Request model for applying edit plans"""
+    resume_id: str = Field(..., description="Unique identifier for the resume")
+    edit_plan: EditPlan = Field(..., description="Edit plan to apply")
+    section_name: str = Field(..., description="Name of the section to apply edits to")
+
+class ApplyPlanResponse(BaseModel):
+    """Response model for applying edit plans"""
+    resume_id: str = Field(..., description="Unique identifier for the resume")
+    updated_lines: List[str] = Field(..., description="Updated text lines after applying edits")
+    change_log: List[ChangeLogItem] = Field(..., description="Detailed log of all changes made")
+    applied_keywords: List[str] = Field(..., description="Keywords that were successfully incorporated")
+    diff_preview: List[Dict[str, Any]] = Field(..., description="Line-by-line diff preview")
+
+class AnnotatedPDFResponse(BaseModel):
+    """Response model for PDF annotation"""
+    resume_id: str = Field(..., description="Unique identifier for the resume")
+    annotated_pdf_url: str = Field(..., description="URL to download the annotated PDF")
+    annotation_summary: Dict[str, Any] = Field(..., description="Summary of annotations applied")
+    original_pdf_url: str = Field(..., description="URL to the original PDF")

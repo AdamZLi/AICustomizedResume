@@ -57,10 +57,22 @@ class KeywordMatcher:
             return False
         
         try:
-            # Use SequenceMatcher for simple fuzzy matching
-            matcher = SequenceMatcher(None, keyword.lower(), text.lower())
-            similarity = matcher.ratio()
-            return similarity >= self.fuzzy_threshold
+            # Split keyword into words for better matching
+            keyword_words = keyword.lower().split()
+            text_lower = text.lower()
+            
+            # If keyword is a single word, use simple fuzzy matching
+            if len(keyword_words) == 1:
+                # Check if the word appears anywhere in the text
+                return keyword_words[0] in text_lower
+            
+            # For multi-word keywords, check if all words appear in the text
+            # This is more lenient than exact matching but still catches variations
+            for word in keyword_words:
+                if word not in text_lower:
+                    return False
+            return True
+            
         except Exception as e:
             logger.warning(f"Fuzzy matching failed for '{keyword}': {e}")
             return False

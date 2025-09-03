@@ -1,20 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-export async function GET(
+export async function POST(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: { id: string } }
 ) {
-  const { id } = await params
-      try {
-      const resumeId = id;
+  try {
+    const formData = await request.formData();
     
     // Forward the request to the FastAPI backend
-    const response = await fetch(`http://localhost:8000/resume/${resumeId}/text`);
-    
+    const response = await fetch(`http://localhost:8000/resume/${params.id}/annotate`, {
+      method: 'POST',
+      body: formData,
+    });
+
     if (!response.ok) {
-      const errorData = await response.json();
+      const errorData = await response.text();
       return NextResponse.json(
-        { error: errorData.detail || 'Text extraction failed' },
+        { error: errorData || 'PDF annotation failed' },
         { status: response.status }
       );
     }
@@ -23,10 +25,11 @@ export async function GET(
     return NextResponse.json(data);
     
   } catch (error) {
-    console.error('Text extraction error:', error);
+    console.error('Annotation API error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
     );
   }
 }
+

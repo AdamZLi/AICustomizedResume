@@ -11,13 +11,13 @@ class SectionParser:
     def __init__(self):
         # Section headings regex patterns (case-insensitive)
         self.section_patterns = {
-            'summary': r'^(summary|professional summary|profile|objective|about)$',
-            'experience': r'^(experience|work experience|employment|professional experience|career history)$',
-            'projects': r'^(projects|project experience|key projects)$',
-            'education': r'^(education|academic|academic background|qualifications)$',
-            'certifications': r'^(certifications|certificates|licenses)$',
-            'skills': r'^(skills|technologies|tech skills|technical skills|competencies|expertise)$',
-            'additional': r'^(additional|other|miscellaneous|interests|hobbies|languages)$'
+            'summary': r'^(summary|professional summary|profile|objective|about|executive summary)$',
+            'experience': r'^(experience|work experience|employment|professional experience|career history|work history|employment history)$',
+            'projects': r'^(projects|project experience|key projects|notable projects|selected projects)$',
+            'education': r'^(education|academic|academic background|qualifications|academic qualifications)$',
+            'certifications': r'^(certifications|certificates|licenses|professional certifications)$',
+            'skills': r'^(skills|technologies|tech skills|technical skills|competencies|expertise|technical competencies|core competencies)$',
+            'additional': r'^(additional|other|miscellaneous|interests|hobbies|languages|activities|volunteer)$'
         }
         
         # Degree keywords for education classification
@@ -88,11 +88,26 @@ class SectionParser:
     def _identify_section_header(self, line: str) -> str:
         """Identify if a line is a section header and return normalized section name"""
         line_upper = line.upper()
+        line_clean = re.sub(r'[^\w\s]', '', line_upper).strip()
         
         # Check for exact matches with section patterns
         for section_name, pattern in self.section_patterns.items():
-            if re.match(pattern, line_upper):
+            if re.match(pattern, line_upper) or re.match(pattern, line_clean):
                 return section_name
+        
+        # Check for common variations and abbreviations
+        if any(word in line_upper for word in ['EXP', 'WORK EXP', 'PROF EXP']):
+            return 'experience'
+        elif any(word in line_upper for word in ['SKILLS', 'TECH', 'TECHNOLOGIES']):
+            return 'skills'
+        elif any(word in line_upper for word in ['EDU', 'ACADEMIC']):
+            return 'education'
+        elif any(word in line_upper for word in ['PROJ', 'PROJECTS']):
+            return 'projects'
+        elif any(word in line_upper for word in ['CERT', 'CERTIFICATIONS']):
+            return 'certifications'
+        elif any(word in line_upper for word in ['SUMMARY', 'PROFILE', 'OBJECTIVE']):
+            return 'summary'
         
         return None
     
@@ -145,3 +160,136 @@ class SectionParser:
             'additional': 'ADDITIONAL INFORMATION'
         }
         return headers.get(section_name, section_name.upper())
+
+
+class ResumeSectionService:
+    def __init__(self):
+        self.section_parser = SectionParser()
+    
+    def get_best_section_for_keywords(self, full_text: str, keywords: List[str]) -> Tuple[str, str]:
+        """
+        Find the best section for incorporating the given keywords
+        
+        Args:
+            full_text: Full resume text
+            keywords: Keywords to incorporate
+            
+        Returns:
+            Tuple of (section_name, section_text)
+        """
+        try:
+            # Parse sections
+            sections = self.section_parser.split_resume_into_sections(full_text)
+            
+            if not sections:
+                # Fallback: return the entire text as experience section
+                return 'experience', full_text
+            
+            # Score each section based on keyword relevance
+            section_scores = {}
+            
+            for section_name, section_text in sections.items():
+                score = self._calculate_keyword_relevance(section_text, keywords)
+                section_scores[section_name] = score
+            
+            # Find the section with highest score
+            best_section = max(section_scores.items(), key=lambda x: x[1])
+            
+            # If no good match, prefer experience or skills sections
+            if best_section[1] < 0.1:  # Low relevance threshold
+                if 'experience' in sections:
+                    return 'experience', sections['experience']
+                elif 'skills' in sections:
+                    return 'skills', sections['skills']
+                else:
+                    # Return first available section
+                    first_section = list(sections.items())[0]
+                    return first_section[0], first_section[1]
+            
+            return best_section[0], sections[best_section[0]]
+            
+        except Exception as e:
+            logger.error(f"Error finding best section for keywords: {str(e)}")
+            # Fallback: return experience section or entire text
+            return 'experience', full_text
+    
+    def get_section_by_name(self, full_text: str, section_name: str) -> Tuple[str, str]:
+        """
+        Get a specific section by name
+        
+        Args:
+            full_text: Full resume text
+            section_name: Name of the section to retrieve
+            
+        Returns:
+            Tuple of (section_name, section_text)
+        """
+        try:
+            # Parse sections
+            sections = self.section_parser.split_resume_into_sections(full_text)
+            
+            if section_name in sections:
+                return section_name, sections[section_name]
+            
+            # If section not found, try to find similar sections
+            for name, content in sections.items():
+                if section_name.lower() in name.lower() or name.lower() in section_name.lower():
+                    return name, content
+            
+            # If still not found, return the first available section
+            if sections:
+                first_section = list(sections.items())[0]
+                return first_section[0], first_section[1]
+            
+            # Last resort: return entire text
+            return 'content', full_text
+            
+        except Exception as e:
+            logger.error(f"Error getting section by name: {str(e)}")
+            return 'content', full_text
+    
+    def _calculate_keyword_relevance(self, section_text: str, keywords: List[str]) -> float:
+        """
+        Calculate how relevant a section is for the given keywords
+        
+        Args:
+            section_text: Text content of the section
+            keywords: Keywords to check relevance against
+            
+        Returns:
+            Relevance score between 0 and 1
+        """
+        try:
+            if not section_text or not keywords:
+                return 0.0
+            
+            section_lower = section_text.lower()
+            total_score = 0.0
+            
+            for keyword in keywords:
+                keyword_lower = keyword.lower()
+                
+                # Check for exact matches
+                if keyword_lower in section_lower:
+                    total_score += 1.0
+                
+                # Check for partial matches (word boundaries)
+                words = section_lower.split()
+                if any(keyword_lower in word or word in keyword_lower for word in words):
+                    total_score += 0.5
+                
+                # Check for related terms (e.g., "Python" vs "Python developer")
+                if any(word in keyword_lower or keyword_lower in word for word in words):
+                    total_score += 0.3
+            
+            # Normalize score
+            max_possible_score = len(keywords) * 1.8  # Max score per keyword
+            if max_possible_score > 0:
+                return min(total_score / max_possible_score, 1.0)
+            
+            return 0.0
+            
+        except Exception as e:
+            logger.error(f"Error calculating keyword relevance: {str(e)}")
+            return 0.0
+
