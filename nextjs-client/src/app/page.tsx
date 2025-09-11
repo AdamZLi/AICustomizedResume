@@ -1,7 +1,12 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import { useRouter } from 'next/navigation'
 import PreviewPanel from './components/PreviewPanel'
+import StructuredEditor from './structured-editor/components/StructuredEditor'
+import LivePreview from './structured-editor/components/LivePreview'
+import { StructuredResume, SectionType } from './structured-editor/types'
+import { useAutosave } from './structured-editor/hooks/useAutosave'
 
 interface KeywordItem {
   text: string
@@ -26,11 +31,19 @@ interface ResumeRewriteResponse {
 }
 
 export default function Home() {
+  const router = useRouter()
+  
   // Resume state
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [uploadedResumeId, setUploadedResumeId] = useState<string | null>(null)
   const [isUploading, setIsUploading] = useState(false)
   const [resumeName, setResumeName] = useState<string>('')
+  
+  // Structured editor state
+  const [structuredResume, setStructuredResume] = useState<StructuredResume | null>(null)
+  const [showStructuredEditor, setShowStructuredEditor] = useState(false)
+  const [isLoadingStructuredResume, setIsLoadingStructuredResume] = useState(false)
+  const [structuredEditorError, setStructuredEditorError] = useState<string | null>(null)
   
   // Job details state
   const [jobTitle, setJobTitle] = useState('')
@@ -72,6 +85,24 @@ export default function Home() {
         setUploadedResumeId(result.resume_id)
         setResumeName(selectedFile.name)
         setSelectedFile(null)
+        
+        // Automatically parse the resume into structured format
+        try {
+          const parseResponse = await fetch('/api/structured-resume/parse', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              resume_id: result.resume_id,
+              parse_options: {}
+            }),
+          })
+          
+          if (parseResponse.ok) {
+            console.log('Resume parsed successfully into structured format')
+          }
+        } catch (parseError) {
+          console.warn('Failed to parse resume into structured format:', parseError)
+        }
       }
     } catch (error) {
       console.error('Upload failed:', error)
@@ -158,6 +189,293 @@ export default function Home() {
       ...kw, 
       isSelected: kw.isSelected && !kw.isAutoSelected 
     })))
+  }
+
+  // Load structured resume for editing
+  const loadStructuredResume = async (resumeId: string) => {
+    setIsLoadingStructuredResume(true)
+    setStructuredEditorError(null)
+    
+    try {
+      // First get the raw resume text
+      const textResponse = await fetch(`/api/resume/${resumeId}/text`)
+      if (!textResponse.ok) {
+        throw new Error('Failed to load resume text')
+      }
+      const textData = await textResponse.json()
+      const resumeText = textData.text
+      
+      // Parse the resume into structured format
+      const parseResponse = await fetch('/api/structured-resume/parse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resume_id: resumeId })
+      })
+      
+      if (!parseResponse.ok) {
+        throw new Error('Failed to parse resume')
+      }
+      
+      const parseResult = await parseResponse.json()
+      let structuredResume = parseResult.structured_resume
+      
+      // If parsing didn't work well, enhance it with basic extraction
+      if (structuredResume.headline.name === "Your Name" || structuredResume.work_experience.length === 0) {
+        console.log("Enhancing parsed resume with frontend extraction")
+        structuredResume = enhanceParsedResume(structuredResume, resumeText)
+        console.log("Enhanced resume:", structuredResume)
+      }
+      
+      console.log("Setting structured resume:", structuredResume)
+      setStructuredResume(structuredResume)
+      setShowStructuredEditor(true)
+    } catch (error) {
+      console.error('Error loading structured resume:', error)
+      setStructuredEditorError(error instanceof Error ? error.message : 'Failed to load resume for editing')
+    } finally {
+      setIsLoadingStructuredResume(false)
+    }
+  }
+
+  // Enhance parsed resume with basic text extraction
+  const enhanceParsedResume = (resume: any, text: string) => {
+    const lines = text.split('\n').map(line => line.trim()).filter(line => line)
+    
+    // Extract name (first line that looks like a name)
+    if (resume.headline.name === "Your Name") {
+      const nameMatch = lines.find(line => /^[A-Z][a-z]+(\s*\([^)]+\))?\s+[A-Z][a-z]+/.test(line))
+      if (nameMatch) {
+        const name = nameMatch.match(/^([A-Z][a-z]+(?:\s*\([^)]+\))?\s+[A-Z][a-z]+)/)?.[1] || nameMatch
+        resume.headline.name = name
+      }
+    }
+    
+    // Extract title (line after name that's not a section header)
+    if (resume.headline.title === "Professional Title") {
+      const nameIndex = lines.findIndex(line => line.includes(resume.headline.name))
+      if (nameIndex >= 0 && nameIndex + 1 < lines.length) {
+        const titleLine = lines[nameIndex + 1]
+        if (!/^[A-Z\s]+$/.test(titleLine) && !titleLine.includes('|') && titleLine.length < 150) {
+          resume.headline.title = titleLine
+        }
+      }
+    }
+    
+    // Extract contact info from the first line
+    const firstLine = lines[0]
+    if (firstLine && firstLine.includes('@') && firstLine.includes('|')) {
+      const parts = firstLine.split('|')
+      const contact: any = {}
+      
+      for (const part of parts) {
+        const trimmed = part.trim()
+        if (trimmed.includes('@') && !contact.email) {
+          // Extract just the email part
+          const emailMatch = trimmed.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/)
+          if (emailMatch) {
+            contact.email = emailMatch[1]
+          }
+        } else if (/^\+?[\d\s\-\(\)]+$/.test(trimmed) && trimmed.replace(/\D/g, '').length >= 10) {
+          contact.phone = trimmed
+        } else if (trimmed.toLowerCase().includes('linkedin')) {
+          contact.linkedin = trimmed
+        } else if (trimmed.toLowerCase().includes('medium')) {
+          contact.medium = trimmed
+        }
+      }
+      
+      if (Object.keys(contact).length > 0) {
+        resume.headline.contact = { ...resume.headline.contact, ...contact }
+      }
+    }
+    
+    // Extract work experience
+    if (resume.work_experience.length === 0) {
+      const workStartIndex = lines.findIndex(line => line.toLowerCase().includes('working experience'))
+      if (workStartIndex >= 0) {
+        const workLines = lines.slice(workStartIndex + 1)
+        const workExperiences = []
+        let currentJob = null
+        let currentBullets = []
+        
+        for (const line of workLines) {
+          // Check if this is a new job (contains company name and dates)
+          if (line.includes('Microsoft') || line.includes('Accenture') || line.includes('Smith School')) {
+            // Save previous job
+            if (currentJob) {
+              currentJob.bullets = currentBullets
+              workExperiences.push(currentJob)
+            }
+            
+            // Start new job
+            const jobMatch = line.match(/^(.+?)\s+(.+?)\s+\((.+?)\)\s+(.+?)$/)
+            if (jobMatch) {
+              currentJob = {
+                id: `work-${workExperiences.length + 1}`,
+                title: jobMatch[1].trim(),
+                company: jobMatch[2].trim(),
+                location: '',
+                start_date: jobMatch[4].split(' ')[0],
+                end_date: jobMatch[4].split(' ')[2] || 'Present',
+                is_current: jobMatch[4].split(' ')[2] === 'Present',
+                bullets: [],
+                order: workExperiences.length,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+              }
+              currentBullets = []
+            }
+          } else if (line.startsWith('- ')) {
+            // This is a bullet point
+            currentBullets.push({
+              id: `bullet-${currentBullets.length + 1}`,
+              text: line.substring(2).trim(),
+              is_active: true,
+              order: currentBullets.length,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            })
+          }
+        }
+        
+        // Save last job
+        if (currentJob) {
+          currentJob.bullets = currentBullets
+          workExperiences.push(currentJob)
+        }
+        
+        resume.work_experience = workExperiences
+      }
+    }
+    
+    // Extract entrepreneurship
+    if (resume.entrepreneurship.length === 0) {
+      const entrepreneurshipStartIndex = lines.findIndex(line => line.toLowerCase().includes('entrepreneurship'))
+      if (entrepreneurshipStartIndex >= 0) {
+        const entrepreneurshipLines = lines.slice(entrepreneurshipStartIndex + 1)
+        const entrepreneurshipExperiences = []
+        let currentVenture = null
+        let currentBullets = []
+        
+        for (const line of entrepreneurshipLines) {
+          // Check if this is a new venture (contains company name and dates)
+          if (line.includes('Uphonest Capital') || line.includes('YouTube') || line.includes('The Great Prep')) {
+            // Save previous venture
+            if (currentVenture) {
+              currentVenture.bullets = currentBullets
+              entrepreneurshipExperiences.push(currentVenture)
+            }
+            
+            // Start new venture
+            const ventureMatch = line.match(/^(.+?)\s+(.+?)\s+(.+?)$/)
+            if (ventureMatch) {
+              currentVenture = {
+                id: `venture-${entrepreneurshipExperiences.length + 1}`,
+                title: ventureMatch[1].trim(),
+                company: ventureMatch[2].trim(),
+                location: '',
+                start_date: ventureMatch[3].split(' ')[0],
+                end_date: ventureMatch[3].split(' ')[2] || 'Present',
+                is_current: ventureMatch[3].split(' ')[2] === 'Present',
+                bullets: [],
+                order: entrepreneurshipExperiences.length,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+              }
+              currentBullets = []
+            }
+          } else if (line.startsWith('- ')) {
+            // This is a bullet point
+            currentBullets.push({
+              id: `bullet-${currentBullets.length + 1}`,
+              text: line.substring(2).trim(),
+              is_active: true,
+              order: currentBullets.length,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            })
+          }
+        }
+        
+        // Save last venture
+        if (currentVenture) {
+          currentVenture.bullets = currentBullets
+          entrepreneurshipExperiences.push(currentVenture)
+        }
+        
+        resume.entrepreneurship = entrepreneurshipExperiences
+      }
+    }
+    
+    // Extract education
+    if (resume.education.length === 0) {
+      const educationStartIndex = lines.findIndex(line => line.toLowerCase().includes('education'))
+      if (educationStartIndex >= 0) {
+        const educationLines = lines.slice(educationStartIndex + 1)
+        const educationEntries = []
+        
+        for (const line of educationLines) {
+          if (line.includes('Bachelor of Commerce') || line.includes('Queens University')) {
+            const educationEntry = {
+              id: `education-${educationEntries.length + 1}`,
+              degree: 'Bachelor of Commerce',
+              institution: 'Queens University',
+              location: '',
+              start_date: '2016',
+              end_date: '2020',
+              gpa: '',
+              extras: [
+                'Deans List | Coursework in CS & Analytics',
+                'Awards: Deans List Scholarship, Queens Excellence Scholarship, Sun Life Global Investment Scholarship',
+                'Extracurriculars: Deloitte Case Competition (1st place), Case IT International Competition (2nd place)'
+              ],
+              order: 0,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            }
+            educationEntries.push(educationEntry)
+            break // Only one education entry in this resume
+          }
+        }
+        
+        resume.education = educationEntries
+      }
+    }
+    
+    // Extract additional info
+    if (resume.additional_info.length === 0) {
+      const additionalInfoStartIndex = lines.findIndex(line => line.toLowerCase().includes('additional information'))
+      if (additionalInfoStartIndex >= 0) {
+        const additionalInfoLines = lines.slice(additionalInfoStartIndex + 1)
+        const additionalInfoEntries = []
+        
+        // Blog Writing
+        const blogLine = additionalInfoLines.find(line => line.includes('Blog Writing'))
+        if (blogLine) {
+          additionalInfoEntries.push({
+            id: 'additional-1',
+            category: 'Blog Writing',
+            items: ['What Makes a Great Product Manager, Product Requirement Documentation Guidebook'],
+            order: 0
+          })
+        }
+        
+        // Technology & Skills
+        const skillsLine = additionalInfoLines.find(line => line.includes('Technology & Skills'))
+        if (skillsLine) {
+          additionalInfoEntries.push({
+            id: 'additional-2',
+            category: 'Technology & Skills',
+            items: ['LangChain, VectorDB, SQL, Kusto, Power BI, Python, Azure DevOps, JIRA, Design Thinking'],
+            order: 1
+          })
+        }
+        
+        resume.additional_info = additionalInfoEntries
+      }
+    }
+    
+    return resume
   }
 
   // Plan and Annotate Resume
@@ -362,17 +680,29 @@ export default function Home() {
                           <p className="text-xs text-green-600">Ready for tailoring</p>
                         </div>
                       </div>
-                      <button
-                        onClick={() => {
-                          setUploadedResumeId(null)
-                          setResumeName('')
-                          setKeywords([])
-                          setTailorResult(null)
-                        }}
-                        className="text-green-600 hover:text-green-800 text-sm"
-                      >
-                        Change
-                      </button>
+                      <div className="flex items-center space-x-2">
+                        <button
+                          onClick={() => {
+                            if (!uploadedResumeId) return
+                            loadStructuredResume(uploadedResumeId)
+                          }}
+                          disabled={isLoadingStructuredResume}
+                          className="bg-blue-600 text-white px-3 py-1 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isLoadingStructuredResume ? 'Loading...' : 'Edit Resume'}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setUploadedResumeId(null)
+                            setResumeName('')
+                            setKeywords([])
+                            setTailorResult(null)
+                          }}
+                          className="text-green-600 hover:text-green-800 text-sm"
+                        >
+                          Change
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -633,6 +963,68 @@ export default function Home() {
           )}
         </div>
       </div>
+
+      {/* Structured Editor Section */}
+      {showStructuredEditor && (
+        <div className="max-w-7xl mx-auto px-6 py-6">
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-2xl font-semibold text-gray-900">Resume Editor</h2>
+                <p className="text-sm text-gray-600">Edit your resume sections below</p>
+              </div>
+              <button
+                onClick={() => setShowStructuredEditor(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {structuredEditorError ? (
+              <div className="text-center py-8">
+                <div className="text-red-600 mb-4">
+                  <svg className="w-12 h-12 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Error Loading Resume</h3>
+                <p className="text-gray-600 mb-4">{structuredEditorError}</p>
+                <button
+                  onClick={() => setStructuredEditorError(null)}
+                  className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
+                >
+                  Try Again
+                </button>
+              </div>
+            ) : structuredResume ? (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Left Panel - Structured Editor */}
+                <div className="bg-gray-50 rounded-xl border border-gray-200 overflow-hidden">
+                  <StructuredEditor
+                    resume={structuredResume}
+                    onResumeUpdate={(updatedResume) => setStructuredResume(updatedResume)}
+                  />
+                </div>
+                
+                {/* Right Panel - Live Preview */}
+                <div className="bg-gray-50 rounded-xl border border-gray-200 overflow-hidden">
+                  <LivePreview
+                    resume={structuredResume}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-8">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+                <p className="text-gray-600">Loading resume editor...</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -13,6 +13,7 @@ from models import JobTextRequest, JobURLRequest, KeywordsResponse
 from scraping import fetch_and_clean
 from openai_service import extract_keywords_with_openai
 from routers.resume import router as resume_router
+from routers.structured_resume import router as structured_resume_router
 from services.resume_loader import ResumeLoaderService
 from services.keyword_match import KeywordMatcher
 
@@ -49,6 +50,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(resume_router)
+app.include_router(structured_resume_router)
 
 @app.get("/")
 async def root():
